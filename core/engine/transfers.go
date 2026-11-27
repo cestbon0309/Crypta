@@ -645,6 +645,38 @@ func (m *Manager) uploading(id string) map[string]bool {
 	return busy
 }
 
+// Move and Mkdir are the FS ones, refused for a name that an unfinished
+// upload is writing to: the upload would otherwise land on the same name.
+func (m *Manager) Move(ctx context.Context, fs *FS, from, to string) error {
+	m.naming.Lock()
+	defer m.naming.Unlock()
+	if err := m.held(to); err != nil {
+		return err
+	}
+	return fs.Move(ctx, from, to)
+}
+
+func (m *Manager) Mkdir(ctx context.Context, fs *FS, p string) error {
+	m.naming.Lock()
+	defer m.naming.Unlock()
+	if err := m.held(p); err != nil {
+		return err
+	}
+	return fs.Mkdir(ctx, p)
+}
+
+// held reports an unfinished upload to p or to a folder above it, which
+// creating p would create too.
+func (m *Manager) held(p string) error {
+	busy := m.uploading("")
+	for p = Clean(p); p != ""; p, _ = split(p) {
+		if busy[p] {
+			return fmt.Errorf("an upload to %s is under way", p)
+		}
+	}
+	return nil
+}
+
 // freeLocal returns p, or "name (2).ext" and so on when p is taken by a
 // file or by another download.
 func (m *Manager) freeLocal(p string) string {

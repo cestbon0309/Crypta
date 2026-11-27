@@ -170,7 +170,11 @@ func (a *app) routes(mux *http.ServeMux, s *api.Server) {
 		cfg, err := engine.FromRcloneConf(in.RcloneConf, in.Remote)
 		if err == nil {
 			a.mu.Lock()
-			next := saved{Config: cfg, Server: a.saved.Server, ServerToken: a.saved.ServerToken}
+			next := saved{Config: cfg}
+			// A paired server stores to the storage it was paired with.
+			if storageKey(cfg) == storageKey(a.saved.Config) {
+				next.Server, next.ServerToken = a.saved.Server, a.saved.ServerToken
+			}
 			a.mu.Unlock()
 			err = a.apply(next)
 		}

@@ -316,5 +316,8 @@ func (d *Drive) UploadChunk(ctx context.Context, session string, offset int64, d
 		return false, err
 	}
 	resp.Body.Close()
+	if end := offset + int64(len(data)); resp.StatusCode == 308 && parseRange(resp) != end {
+		return false, fmt.Errorf("Drive stored %d of %d bytes", parseRange(resp), end)
+	}
 	return resp.StatusCode != 308, nil
 }

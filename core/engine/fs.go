@@ -38,6 +38,7 @@ type FS struct {
 	C      *crypt.Cipher
 	base   string
 	mu     sync.Mutex
+	mk     sync.Mutex           // serializes folder creation
 	dirs   map[string]*dirCache // by clean path, "" is the root
 	nonces map[string]crypt.Nonce
 }
@@ -132,12 +133,29 @@ func (f *FS) dir(ctx context.Context, p string, create bool) (*dirCache, error) 
 		if it := items[name]; it != nil && it.IsDir {
 			id = it.id
 		} else if create {
-			e, err := f.R.Mkdir(ctx, pdc.id, f.C.EncryptName(name, true))
-			if err != nil {
+			// One creator at a time, or two uploads into a new folder
+			// would each make their own copy of it.
+			f.mk.Lock()
+			defer f.mk.Unlock()
+			f.mu.Lock()
+			dc := f.dirs[p]
+			f.mu.Unlock()
+			if dc != nil {
+				return dc, nil
+			}
+			if items, _, err = f.list(ctx, parent, true, true); err != nil {
 				return nil, err
 			}
-			id = e.ID
-			f.invalidate(parent)
+			if it := items[name]; it != nil && it.IsDir {
+				id = it.id
+			} else {
+				e, err := f.R.Mkdir(ctx, pdc.id, f.C.EncryptName(name, true))
+				if err != nil {
+					return nil, err
+				}
+				id = e.ID
+				f.invalidate(parent)
+			}
 		} else {
 			return nil, fmt.Errorf("%s: %w", p, remote.ErrNotFound)
 		}
@@ -190,6 +208,22 @@ func (f *FS) list(ctx context.Context, p string, create, fresh bool) (map[string
 	}
 	f.mu.Lock()
 	dc.items, dc.at = items, time.Now()
+	// Another client may have replaced files or folders under the same
+	// names: drop cached headers, and cached folders whose id changed.
+	clear(f.nonces)
+	prefix := p + "/"
+	if p == "" {
+		prefix = ""
+	}
+	for k := range f.dirs {
+		if k == p || !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		child, _, _ := strings.Cut(k[len(prefix):], "/")
+		if top := f.dirs[prefix+child]; top == nil || items[child] == nil || !items[child].IsDir || items[child].id != top.id {
+			delete(f.dirs, k)
+		}
+	}
 	f.mu.Unlock()
 	return items, dc, nil
 }
@@ -197,6 +231,7 @@ func (f *FS) list(ctx context.Context, p string, create, fresh bool) (map[string
 func (f *FS) invalidate(p string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	clear(f.nonces)
 	if dc := f.dirs[p]; dc != nil {
 		dc.items = nil
 	}

@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -17,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cestbon0309/crypta/core/crypt"
@@ -63,6 +66,8 @@ type Transfer struct {
 	Nonce   []byte    `json:"nonce,omitempty"`
 	Session string    `json:"session,omitempty"`
 	SrcMod  time.Time `json:"srcMod,omitzero"`
+	// ETag or Last-Modified of a partly fetched URL, sent as If-Range.
+	Validator string `json:"validator,omitempty"`
 
 	cancel context.CancelFunc
 }
@@ -79,7 +84,33 @@ type Manager struct {
 	Workers   int
 	// RetryDelay is the base wait before a failed upload chunk is retried.
 	RetryDelay time.Duration
+	// AllowPrivateURLs lets URL jobs reach loopback, private and link-local
+	// addresses (cloud metadata, services next to the server).
+	AllowPrivateURLs bool
 }
+
+func publicOnly(network, address string, _ syscall.RawConn) error {
+	host, _, _ := net.SplitHostPort(address)
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return err
+	}
+	ip = ip.Unmap()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() ||
+		netip.MustParsePrefix("100.64.0.0/10").Contains(ip) {
+		return fmt.Errorf("%s is a private address; set CRYPTA_ALLOW_PRIVATE_URLS=1 to allow it", host)
+	}
+	return nil
+}
+
+// The check runs on the address actually dialed, so redirects and DNS
+// answers pointing inwards are covered too.
+var publicClient = &http.Client{Transport: &http.Transport{
+	Proxy:                 nil,
+	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, Control: publicOnly}).DialContext,
+	TLSHandshakeTimeout:   15 * time.Second,
+	ResponseHeaderTimeout: 60 * time.Second,
+}}
 
 // NewManager loads the queue from stateDir. filesDir is the base for
 // relative local paths (the app's Documents directory on iOS, whose absolute
@@ -144,7 +175,9 @@ func (m *Manager) schedule(ctx context.Context) {
 		case StateRunning:
 			running++
 		case StateQueued:
-			queued = append(queued, t)
+			if t.cancel == nil { // the previous worker has exited
+				queued = append(queued, t)
+			}
 		}
 	}
 	sort.Slice(queued, func(i, j int) bool { return queued[i].CreatedAt.Before(queued[j].CreatedAt) })
@@ -455,10 +488,16 @@ func (m *Manager) fetch(ctx context.Context, t *Transfer) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "Crypta/1.0")
-	if pos > 0 {
+	// Without a validator the link may serve different content now.
+	if pos > 0 && t.Validator != "" {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", pos))
+		req.Header.Set("If-Range", t.Validator)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := publicClient
+	if m.AllowPrivateURLs {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -493,8 +532,12 @@ func (m *Manager) fetch(ctx context.Context, t *Transfer) error {
 	if name == "" || name == "." || name == "/" {
 		name = "download-" + t.ID
 	}
+	validator := resp.Header.Get("ETag")
+	if validator == "" || strings.HasPrefix(validator, "W/") {
+		validator = resp.Header.Get("Last-Modified")
+	}
 	m.update(t, func() {
-		t.Phase, t.Name = "downloading", name
+		t.Phase, t.Name, t.Validator = "downloading", name, validator
 		if resp.ContentLength >= 0 {
 			t.Size = pos + resp.ContentLength
 		}
@@ -554,6 +597,7 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 		if t.Local == "" {
 			t.Local = path.Join("Downloads", t.Name)
 		}
+		t.Local = m.freeLocal(t.Local)
 	case KindURL:
 		u, err := url.Parse(t.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
@@ -570,6 +614,49 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 	m.mu.Unlock()
 	m.kick()
 	return &cp, nil
+}
+
+// freeLocal returns p, or "name (2).ext" and so on when p is taken by a
+// file or by another download.
+func (m *Manager) freeLocal(p string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	taken := func(p string) bool {
+		if _, err := os.Lstat(m.abs(p)); err == nil {
+			return true
+		}
+		for _, t := range m.items {
+			if t.Kind == KindDownload && t.Local == p && t.State != StateDone && t.State != StateCanceled {
+				return true
+			}
+		}
+		return false
+	}
+	ext := path.Ext(p)
+	stem := strings.TrimSuffix(p, ext)
+	for i := 2; taken(p); i++ {
+		p = fmt.Sprintf("%s (%d)%s", stem, i, ext)
+	}
+	return p
+}
+
+// Reset cancels and forgets every transfer; used when the storage they
+// belong to is replaced.
+func (m *Manager) Reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, t := range m.items {
+		if t.State != StateDone {
+			t.State = StateCanceled
+			if t.cancel != nil {
+				t.cancel()
+			} else {
+				m.cleanup(t)
+			}
+		}
+		delete(m.items, id)
+	}
+	m.saveLocked(true)
 }
 
 func (m *Manager) List() []Transfer {

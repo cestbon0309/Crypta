@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -113,8 +114,14 @@ func (a *app) apply(s saved) error {
 		return err
 	}
 	a.mu.Lock()
+	before, _ := json.Marshal(a.saved.Config)
+	after, _ := json.Marshal(s.Config)
 	a.saved = s
 	a.mu.Unlock()
+	if !bytes.Equal(before, after) {
+		// Queued work belongs to the storage that was just replaced.
+		a.srv.Transfers.Reset()
+	}
 	a.srv.SetFS(fs)
 	return nil
 }
@@ -188,6 +195,14 @@ func NormalizeServer(s string) (string, error) {
 	u, err := url.Parse(s)
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return "", errors.New("server address is not valid")
+	}
+	// Pairing sends the Drive login and the encryption password, so plain
+	// http is only accepted for a server on this device or the local network.
+	if u.Scheme == "http" {
+		ip, err := netip.ParseAddr(u.Hostname())
+		if u.Hostname() != "localhost" && (err != nil || !(ip.IsLoopback() || ip.IsPrivate())) {
+			return "", errors.New("use an https:// address; http is only allowed for local network addresses")
+		}
 	}
 	return s, nil
 }

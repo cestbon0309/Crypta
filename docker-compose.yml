@@ -13,6 +13,7 @@ services:
       CRYPTA_PUBLIC_URL: ${CRYPTA_PUBLIC_URL:-}
       CRYPTA_REMOTE: ${CRYPTA_REMOTE:-}
       CRYPTA_DEMO: ${CRYPTA_DEMO:-}
+      CRYPTA_ALLOW_PRIVATE_URLS: ${CRYPTA_ALLOW_PRIVATE_URLS:-}
       TZ: ${TZ:-UTC}
     volumes:
       - ${RCLONE_CONF:-./rclone.conf}:/config/rclone.conf:ro

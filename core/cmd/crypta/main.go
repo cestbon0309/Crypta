@@ -84,6 +84,9 @@ func serve() error {
 		return fmt.Errorf("cannot list the encrypted folder: %w", err)
 	}
 	tm, err := engine.NewManager(stateDir, downloads)
+	if tm != nil {
+		tm.AllowPrivateURLs = os.Getenv("CRYPTA_ALLOW_PRIVATE_URLS") == "1"
+	}
 	if err != nil {
 		return err
 	}

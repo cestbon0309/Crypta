@@ -246,6 +246,9 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		ct = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", ct)
+	// Stored files are untrusted: never let one run as a page of this origin.
+	w.Header().Set("Content-Security-Policy", "sandbox")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Last-Modified", it.ModTime.UTC().Format(http.TimeFormat))
 	start, end, status := int64(0), it.Size-1, 200

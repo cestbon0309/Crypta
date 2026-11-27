@@ -10,15 +10,15 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cestbon0309/crypta/core/api"
 )
 
 const (
-	CodeTTL     = 10 * time.Minute
-	maxFailures = 10
-	alphabet    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no 0/O/1/I
+	CodeTTL  = 10 * time.Minute
+	alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no 0/O/1/I
 )
 
 type Pairing struct {
@@ -36,12 +36,27 @@ type Device struct {
 type data struct {
 	Pairings []Pairing `json:"pairings"`
 	Devices  []Device  `json:"devices"`
-	Failures int       `json:"failures"`
 }
 
 type Store struct {
 	Path string
 	mu   sync.Mutex
+}
+
+// lock also holds a file lock: the server and the CLI are separate
+// processes that read, change and rewrite the same file.
+func (s *Store) lock() func() {
+	s.mu.Lock()
+	f, err := os.OpenFile(s.Path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err == nil {
+		syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	}
+	return func() {
+		if f != nil {
+			f.Close()
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (s *Store) load() data {
@@ -84,8 +99,7 @@ func NormalizeCode(c string) string {
 
 // NewCode creates a one-time pairing code like "ABCD-EFGH".
 func (s *Store) NewCode() (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock()()
 	raw := make([]byte, 8)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -96,7 +110,6 @@ func (s *Store) NewCode() (string, error) {
 	}
 	d := s.load()
 	d.Pairings = append(d.Pairings, Pairing{CodeHash: api.TokenHash(string(code)), Expires: time.Now().Add(CodeTTL)})
-	d.Failures = 0
 	return string(code[:4]) + "-" + string(code[4:]), s.save(d)
 }
 
@@ -104,8 +117,7 @@ var ErrBadCode = errors.New("pairing code is wrong or expired; run `crypta pair`
 
 // Redeem exchanges a pairing code for a new device token.
 func (s *Store) Redeem(code, name string) (token string, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock()()
 	d := s.load()
 	h := api.TokenHash(NormalizeCode(code))
 	for i, p := range d.Pairings {
@@ -116,15 +128,11 @@ func (s *Store) Redeem(code, name string) (token string, err error) {
 				name = "iPhone"
 			}
 			d.Devices = append(d.Devices, Device{ID: Random(4), Name: name, TokenHash: api.TokenHash(token), Created: time.Now()})
-			d.Failures = 0
 			return token, s.save(d)
 		}
 	}
-	// Too many wrong guesses void all outstanding codes.
-	if d.Failures++; d.Failures >= maxFailures {
-		d.Pairings, d.Failures = nil, 0
-	}
-	s.save(d)
+	// A code has 40 random bits and lives ten minutes, so guessing is
+	// hopeless; wrong guesses must not cost the owner the real code.
 	return "", ErrBadCode
 }
 
@@ -132,8 +140,7 @@ func (s *Store) Valid(token string) bool {
 	if token == "" {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock()()
 	h := api.TokenHash(token)
 	for _, dev := range s.load().Devices {
 		if api.SameToken(dev.TokenHash, h) {
@@ -144,14 +151,12 @@ func (s *Store) Valid(token string) bool {
 }
 
 func (s *Store) Devices() []Device {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock()()
 	return s.load().Devices
 }
 
 func (s *Store) Revoke(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer s.lock()()
 	d := s.load()
 	for i, dev := range d.Devices {
 		if dev.ID == id {

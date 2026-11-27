@@ -52,4 +52,4 @@ POST /api/transfers
 
 ## 配对
 
-`POST /api/pair` `{"code","name"}` 是唯一不需要令牌的接口：用 `crypta pair` 生成的一次性配对码（10 分钟有效，输错 10 次全部作废）换取设备令牌和打开加密文件夹所需的配置。
+`POST /api/pair` `{"code","name"}` 是唯一不需要令牌的接口：用 `crypta pair` 生成的一次性配对码（10 分钟有效）换取设备令牌和打开加密文件夹所需的配置。

@@ -182,13 +182,27 @@ func parentPath(_ path: String) -> String {
     return String(path[..<i])
 }
 
+/// The transfer lists. They change every second while something is being
+/// transferred, so they live apart from AppModel: only the views that show
+/// them are redrawn.
+@MainActor
+final class TransferStore: ObservableObject {
+    /// Uploads and downloads of this phone.
+    @Published var local: [Transfer] = []
+    /// Offline download jobs on the paired server.
+    @Published var server: [Transfer] = []
+    @Published var serverReachable = true
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var api: API?
     @Published var startError: String?
     @Published var setup = SetupStatus()
     @Published var loaded = false
-    @Published var transfers: [Transfer] = []
+    let store = TransferStore()
+    /// How many of this phone's transfers are running or queued.
+    @Published var activeTransfers = 0
     /// Bumped whenever an upload finishes, so open folders reload.
     @Published var uploadsFinished = 0
     @Published var pendingPair: (server: String, code: String)?
@@ -244,7 +258,9 @@ final class AppModel: ObservableObject {
 
     func pollTransfers() async {
         guard let api, setup.configured, let list = try? await api.transfers() else { return }
-        if list != transfers { transfers = list }
+        if list != store.local { store.local = list }
+        let active = list.filter(\.isActive).count
+        if active != activeTransfers { activeTransfers = active }
         let done = Set(list.filter { $0.state == "done" && $0.kind != "download" }.map(\.id))
         if !done.subtracting(doneIDs).isEmpty { uploadsFinished += 1 }
         doneIDs = done
@@ -256,8 +272,19 @@ final class AppModel: ObservableObject {
         setup = try await api.post(path, body, timeout: 90)
         // Previews belong to the storage that was just replaced.
         await ThumbnailStore.shared.clear()
-        transfers = []
+        store.local = []
+        store.server = []
         await pollTransfers()
+    }
+
+    func pollServer() async {
+        guard let server else {
+            if !store.server.isEmpty { store.server = [] }
+            return
+        }
+        let list = try? await server.transfers()
+        if let list, list != store.server { store.server = list }
+        if (list != nil) != store.serverReachable { store.serverReachable = list != nil }
     }
 
     func handle(url: URL) {

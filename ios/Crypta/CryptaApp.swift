@@ -10,6 +10,7 @@ struct CryptaApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                .environmentObject(model.store)
                 .onAppear { model.start() }
                 .onOpenURL { model.handle(url: $0) }
         }
@@ -18,7 +19,7 @@ struct CryptaApp: App {
             // Ask iOS for a little extra time so short transfers can finish
             // after the app leaves the screen. Longer ones continue from
             // where they stopped the next time the app is opened.
-            if phase == .background, model.transfers.contains(where: \.isActive) {
+            if phase == .background, model.activeTransfers > 0 {
                 background = UIApplication.shared.beginBackgroundTask {
                     UIApplication.shared.endBackgroundTask(background)
                     background = .invalid
@@ -73,7 +74,7 @@ struct MainTabs: View {
 
             NavigationStack { TransfersView() }
                 .tabItem { Label("传输", systemImage: "arrow.up.arrow.down") }
-                .badge(model.transfers.filter(\.isActive).count)
+                .badge(model.activeTransfers)
 
             NavigationStack { SettingsView() }
                 .tabItem { Label("设置", systemImage: "gearshape") }

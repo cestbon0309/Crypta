@@ -309,15 +309,13 @@ struct BrowserView: View {
         List {
             ForEach(shown) { item in
                 entry(item) { ItemRow(item: item, detailed: mode == .details, selected: selecting ? selection.contains(item.id) : nil) }
-                    .swipeActions(edge: .trailing) {
+                    // Not a destructive button: that one takes the row away
+                    // at once, before the deletion is confirmed.
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         if !selecting {
-                            Button(role: .destructive) { deleting = [item] } label: { Label("删除", systemImage: "trash") }
-                            Button { moving = MoveRequest(items: [item]) } label: { Label("移动", systemImage: "folder") }.tint(.gray)
-                        }
-                    }
-                    .swipeActions(edge: .leading) {
-                        if !item.isDir && !selecting {
-                            Button { download(item) } label: { Label("下载", systemImage: "arrow.down.circle") }.tint(.accentColor)
+                            Button { deleting = [item] } label: { Image(systemName: "trash") }
+                                .tint(.red)
+                                .accessibilityLabel("删除")
                         }
                     }
             }

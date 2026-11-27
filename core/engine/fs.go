@@ -143,19 +143,23 @@ func (f *FS) dir(ctx context.Context, p string, create bool) (*dirCache, error) 
 			if dc != nil {
 				return dc, nil
 			}
-			if items, _, err = f.list(ctx, parent, true, true); err != nil {
+			// Ask the remote directly: going through list could come
+			// back here for the parent while the lock is held.
+			enc := f.C.EncryptName(name, true)
+			entries, err := f.R.List(ctx, pdc.id)
+			if err != nil {
 				return nil, err
 			}
-			if it := items[name]; it != nil && it.IsDir {
-				id = it.id
+			if e := find(entries, enc, true); e != nil {
+				id = e.ID
 			} else {
-				e, err := f.R.Mkdir(ctx, pdc.id, f.C.EncryptName(name, true))
+				e, err := f.R.Mkdir(ctx, pdc.id, enc)
 				if err != nil {
 					return nil, err
 				}
 				id = e.ID
-				f.invalidate(parent)
 			}
+			f.invalidate(parent)
 		} else {
 			return nil, fmt.Errorf("%s: %w", p, remote.ErrNotFound)
 		}

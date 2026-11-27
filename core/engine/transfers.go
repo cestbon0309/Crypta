@@ -110,6 +110,8 @@ var publicClient = &http.Client{Transport: &http.Transport{
 	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, Control: publicOnly}).DialContext,
 	TLSHandshakeTimeout:   15 * time.Second,
 	ResponseHeaderTimeout: 60 * time.Second,
+	MaxIdleConns:          8,
+	IdleConnTimeout:       30 * time.Second,
 }}
 
 // NewManager loads the queue from stateDir. filesDir is the base for

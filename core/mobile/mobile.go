@@ -96,6 +96,18 @@ func (a *app) fixPaths(cfg *engine.Config) *engine.Config {
 	return cfg
 }
 
+// storageKey identifies where a config stores data, ignoring the Drive
+// login, which changes whenever the token is refreshed.
+func storageKey(cfg *engine.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	c := *cfg
+	c.Drive.Token, c.Drive.ClientID, c.Drive.ClientSecret = nil, "", ""
+	b, _ := json.Marshal(c)
+	return string(b)
+}
+
 func (a *app) apply(s saved) error {
 	var fs *engine.FS
 	if s.Config != nil {
@@ -114,11 +126,10 @@ func (a *app) apply(s saved) error {
 		return err
 	}
 	a.mu.Lock()
-	before, _ := json.Marshal(a.saved.Config)
-	after, _ := json.Marshal(s.Config)
+	before, after := storageKey(a.saved.Config), storageKey(s.Config)
 	a.saved = s
 	a.mu.Unlock()
-	if !bytes.Equal(before, after) {
+	if before != after {
 		// Queued work belongs to the storage that was just replaced.
 		a.srv.Transfers.Reset()
 	}
@@ -199,8 +210,10 @@ func NormalizeServer(s string) (string, error) {
 	// Pairing sends the Drive login and the encryption password, so plain
 	// http is only accepted for a server on this device or the local network.
 	if u.Scheme == "http" {
-		ip, err := netip.ParseAddr(u.Hostname())
-		if u.Hostname() != "localhost" && (err != nil || !(ip.IsLoopback() || ip.IsPrivate())) {
+		host := u.Hostname()
+		ip, err := netip.ParseAddr(host)
+		lanName := err != nil && (!strings.Contains(host, ".") || strings.HasSuffix(host, ".local"))
+		if !lanName && (err != nil || !(ip.IsLoopback() || ip.IsPrivate())) {
 			return "", errors.New("use an https:// address; http is only allowed for local network addresses")
 		}
 	}

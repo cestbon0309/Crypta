@@ -116,7 +116,7 @@ if [ -f .env ]; then
 		(
 			umask 077
 			sed -e "s|^CRYPTA_DOMAIN=.*|CRYPTA_DOMAIN=$new|" \
-				-e "s|^CRYPTA_PUBLIC_URL=https://$old\$|CRYPTA_PUBLIC_URL=https://$new|" .env >.env.new
+				-e "s|^CRYPTA_PUBLIC_URL=https://$old[[:space:]]*\$|CRYPTA_PUBLIC_URL=https://$new|" .env >.env.new
 		)
 		mv .env.new .env
 	fi

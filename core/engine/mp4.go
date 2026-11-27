@@ -46,7 +46,7 @@ func mp4SplitTracks(size int64, read func(off, n int64) ([]byte, error)) (bool, 
 			return false, 0, nil
 		}
 		if string(h[4:8]) == "moov" {
-			if n > 256<<20 {
+			if n > 32<<20 {
 				return false, 0, nil
 			}
 			if moov, err = read(off+hdr, n-hdr); err != nil {

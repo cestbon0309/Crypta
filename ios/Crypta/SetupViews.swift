@@ -245,7 +245,7 @@ struct SettingsView: View {
             } header: {
                 Text("服务器")
             } footer: {
-                Text("服务器是可选的：它负责离线下载，下载完成后加密上传到 Google Drive。离线下载在“文件”页右上角的 + 里。")
+                Text("服务器是可选的：它负责离线下载，下载完成后加密上传到 Google Drive。在“文件”页右上角的 + 里添加离线下载，进度在“传输”页的“下载”里。")
             }
             Section {
                 Button("退出并清除本机配置", role: .destructive) { confirmReset = true }

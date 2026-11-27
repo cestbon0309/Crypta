@@ -198,6 +198,7 @@ fi
 compose() {
 	env -u CRYPTA_PUBLIC_URL -u CRYPTA_DOMAIN -u RCLONE_CONF -u CRYPTA_REMOTE -u CRYPTA_DEMO -u CRYPTA_BIND \
 		-u TELEGRAM_BOT_TOKEN -u TELEGRAM_ALLOWED_USERS -u TELEGRAM_REMOTE_DIR -u TELEGRAM_API_BASE \
+		-u TELEGRAM_LOCAL_MODE -u TELEGRAM_API_ID -u TELEGRAM_API_HASH \
 		-u PIKPAK_USERNAME -u PIKPAK_PASSWORD -u PIKPAK_PROXY \
 		$DOCKER compose "$@"
 }
@@ -205,6 +206,7 @@ compose() {
 profiles=()
 [ -n "$(val CRYPTA_DOMAIN)" ] && profiles+=(--profile https)
 [ -n "$(val TELEGRAM_BOT_TOKEN)" ] && profiles+=(--profile telegram)
+[ -n "$(val TELEGRAM_BOT_TOKEN)" ] && [ -n "$(val TELEGRAM_API_ID)" ] && profiles+=(--profile telegram-bot-api)
 
 say "Building and starting"
 compose ${profiles[@]+"${profiles[@]}"} up -d --build

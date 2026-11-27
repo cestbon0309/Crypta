@@ -96,6 +96,12 @@ type Transfer struct {
 	DirID string `json:"dirID,omitempty"`
 	// ETag or Last-Modified of a partly fetched URL, sent as If-Range.
 	Validator string `json:"validator,omitempty"`
+	// External is set while a plugin is still fetching the file of an
+	// upload: the plugin reports the progress and no worker runs the job.
+	External bool `json:"external,omitempty"`
+
+	seen     time.Time // last progress report of an external job
+	seenDone int64
 
 	cancel context.CancelFunc
 }
@@ -160,7 +166,7 @@ func NewManager(stateDir, filesDir string) (*Manager, error) {
 		var list []*Transfer
 		if json.Unmarshal(b, &list) == nil {
 			for _, t := range list {
-				if t.State == StateRunning {
+				if t.State == StateRunning && !t.External {
 					t.State = StateQueued
 				}
 				t.Speed = 0
@@ -208,7 +214,9 @@ func (m *Manager) schedule(ctx context.Context) {
 	for _, t := range m.items {
 		switch t.State {
 		case StateRunning:
-			running++
+			if !t.External {
+				running++
+			}
 		case StateQueued:
 			if t.cancel == nil { // the previous worker has exited
 				queued = append(queued, t)
@@ -929,6 +937,104 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 	return &cp, nil
 }
 
+// AddExternal lists an upload whose file a plugin is still fetching. The
+// plugin reports how far it is with Report and hands the file over with
+// Ready, or gives up with Fail.
+func (m *Manager) AddExternal(name, remoteDir string, size int64) (*Transfer, error) {
+	name = path.Base(filepath.ToSlash(name))
+	if name == "" || name == "." || name == "/" {
+		return nil, errors.New("name required")
+	}
+	t := &Transfer{ID: newID(), Kind: KindUpload, State: StateRunning, Phase: "downloading", External: true,
+		Name: name, Remote: path.Join(Clean(remoteDir), name), Size: max(size, 0), CreatedAt: time.Now()}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.items[t.ID] = t
+	m.saveLocked(true)
+	cp := *t
+	return &cp, nil
+}
+
+// external returns the job a plugin is fetching; m.mu is held.
+func (m *Manager) external(id string) (*Transfer, error) {
+	t := m.items[id]
+	if t == nil {
+		return nil, remote.ErrNotFound
+	}
+	if !t.External {
+		return nil, errors.New("not a job a plugin is fetching")
+	}
+	return t, nil
+}
+
+// Report records the progress of an external job and returns it, so that
+// the plugin learns of a cancel.
+func (m *Manager) Report(id string, done, size int64) (*Transfer, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, err := m.external(id)
+	if err != nil {
+		return nil, err
+	}
+	if t.State == StateRunning {
+		now := time.Now()
+		if t.seen.IsZero() {
+			t.seen, t.seenDone = now, done
+		} else if el := now.Sub(t.seen); el >= time.Second {
+			t.Speed = max(int64(float64(done-t.seenDone)/el.Seconds()), 0)
+			t.seen, t.seenDone = now, done
+		}
+		t.Done = max(done, 0)
+		if size > 0 {
+			t.Size = size
+		}
+		m.saveLocked(false)
+	}
+	cp := *t
+	return &cp, nil
+}
+
+// Ready queues the upload of the file an external job has fetched.
+func (m *Manager) Ready(id, local string, deleteSource bool) (*Transfer, error) {
+	fi, err := os.Stat(m.abs(local))
+	if err != nil {
+		return nil, err
+	}
+	if fi.IsDir() {
+		return nil, errors.New("folders cannot be uploaded as one job")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, err := m.external(id)
+	if err != nil {
+		return nil, err
+	}
+	if t.State != StateRunning {
+		return nil, fmt.Errorf("the job is %s", t.State)
+	}
+	t.External, t.State, t.Phase, t.Speed, t.Done = false, StateQueued, "uploading", 0, 0
+	t.Local, t.Source, t.Size, t.DeleteSource = local, local, fi.Size(), deleteSource
+	m.saveLocked(true)
+	cp := *t
+	go m.kick()
+	return &cp, nil
+}
+
+// Fail ends an external job whose file could not be fetched.
+func (m *Manager) Fail(id, msg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, err := m.external(id)
+	if err != nil {
+		return err
+	}
+	if t.State == StateRunning {
+		t.State, t.Error, t.Speed = StateFailed, msg, 0
+		m.saveLocked(true)
+	}
+	return nil
+}
+
 // uploading returns the remote paths that unfinished uploads other than
 // id have already started writing to.
 func (m *Manager) uploading(id string) map[string]bool {
@@ -1043,11 +1149,11 @@ func (m *Manager) Act(id, action string) error {
 	active := t.State == StateQueued || t.State == StateRunning
 	switch action {
 	case "pause":
-		if active {
+		if active && !t.External {
 			t.State = StatePaused
 		}
 	case "resume":
-		if t.State == StatePaused || t.State == StateFailed {
+		if (t.State == StatePaused || t.State == StateFailed) && !t.External {
 			t.State, t.Error = StateQueued, ""
 		}
 	case "cancel", "remove":

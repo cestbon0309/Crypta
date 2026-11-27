@@ -252,3 +252,63 @@ func TestUploadNameIsHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A plugin lists its download before it has the file, reports progress,
+// then hands the file over; the job never takes a worker while it waits.
+func TestExternalJobs(t *testing.T) {
+	m, fs, files := driveRig(t)
+	m.Workers = 1
+
+	ext, err := m.AddExternal("../clip.bin", "tg", 100)
+	if err != nil || ext.State != StateRunning || ext.Phase != "downloading" || ext.Remote != "tg/clip.bin" {
+		t.Fatalf("%+v %v", ext, err)
+	}
+	m.Act(ext.ID, "pause") // nothing to pause: the plugin is fetching
+	if got, _ := m.Report(ext.ID, 40, 3000); got.Done != 40 || got.Size != 3000 || got.State != StateRunning {
+		t.Fatalf("%+v", got)
+	}
+
+	// The only worker is free for other jobs meanwhile.
+	os.WriteFile(filepath.Join(files, "other.bin"), []byte("other"), 0o644)
+	other, _ := m.Add(Transfer{Kind: KindUpload, Local: "other.bin", Remote: "tg"})
+	if s := waitState(t, m, other.ID, StateDone, StateFailed); s.State != StateDone {
+		t.Fatal(s.Error)
+	}
+
+	if _, err := m.Ready(ext.ID, "clip.bin", true); err == nil {
+		t.Fatal("a missing file was accepted")
+	}
+	body := bytes.Repeat([]byte("x"), 3000)
+	os.WriteFile(filepath.Join(files, "clip.bin"), body, 0o644)
+	if _, err := m.Ready(ext.ID, "clip.bin", true); err != nil {
+		t.Fatal(err)
+	}
+	if s := waitState(t, m, ext.ID, StateDone, StateFailed); s.State != StateDone || s.Phase != "uploading" {
+		t.Fatalf("%+v", s)
+	}
+	if got := read(t, fs, "tg/clip.bin"); !bytes.Equal(got, body) {
+		t.Fatalf("stored %d bytes", len(got))
+	}
+	if _, err := os.Stat(filepath.Join(files, "clip.bin")); !os.IsNotExist(err) {
+		t.Fatal("the source file was kept")
+	}
+	if _, err := m.Report(ext.ID, 1, 1); err == nil {
+		t.Fatal("progress accepted for a job the core runs")
+	}
+
+	// A cancel reaches the plugin through its next report.
+	gone, _ := m.AddExternal("gone.bin", "tg", 10)
+	m.Act(gone.ID, "cancel")
+	if got, _ := m.Report(gone.ID, 5, 10); got.State != StateCanceled {
+		t.Fatalf("%+v", got)
+	}
+	if _, err := m.Ready(gone.ID, "other.bin", true); err == nil {
+		t.Fatal("a canceled job was queued")
+	}
+	failed, _ := m.AddExternal("bad.bin", "tg", 10)
+	m.Fail(failed.ID, "too big")
+	m.Act(failed.ID, "resume")
+	if got, _ := m.Report(failed.ID, 0, 0); got.State != StateFailed || got.Error != "too big" {
+		t.Fatalf("%+v", got)
+	}
+}

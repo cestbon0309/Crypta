@@ -56,17 +56,22 @@ $DOCKER info >/dev/null 2>&1 || die "Docker is installed but not running"
 $DOCKER compose version >/dev/null 2>&1 || die "the Docker Compose plugin is missing (package docker-compose-plugin)"
 
 say "Fetching Crypta into $DIR"
-# The token is passed per command so it is never written to .git/config.
+# The token reaches git through its environment, so it is neither written
+# to .git/config nor visible in the process list.
 git_auth() {
 	if [ -n "${GITHUB_TOKEN:-}" ]; then
-		git -c "http.https://github.com/.extraheader=Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" "$@"
+		GIT_CONFIG_COUNT=1 \
+			GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+			GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
+			git "$@"
 	else
 		git "$@"
 	fi
 }
 if [ -d "$DIR/.git" ]; then
 	git_auth -C "$DIR" fetch --depth 1 origin "$REF"
-	git -C "$DIR" checkout -q -B "$REF" FETCH_HEAD
+	git -C "$DIR" merge -q --ff-only FETCH_HEAD ||
+		die "$DIR has changes of its own; update it by hand with git"
 else
 	git_auth clone --depth 1 --branch "$REF" "$URL" "$DIR" ||
 		die "could not download $REPO; for a private repository set GITHUB_TOKEN"
@@ -91,11 +96,16 @@ else
 		install -m 600 "$RCLONE_CONF" rclone.conf
 	else
 		demo=1
-		: >rclone.conf
+		[ -e rclone.conf ] || : >rclone.conf
 	fi
 
 	if [ -n "$CRYPTA_DOMAIN" ]; then
 		url=https://$CRYPTA_DOMAIN
+		bind=127.0.0.1:8080
+	elif [ -z "$demo" ]; then
+		# Pairing hands over the Drive login, so without HTTPS the port
+		# stays on this machine.
+		url=http://127.0.0.1:8080
 		bind=127.0.0.1:8080
 	else
 		ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip=
@@ -119,17 +129,24 @@ TELEGRAM_API_BASE=
 ENV
 fi
 
+# Settings come from .env only, not from answers exported for an earlier run.
+compose() {
+	env -u CRYPTA_PUBLIC_URL -u CRYPTA_DOMAIN -u RCLONE_CONF -u CRYPTA_REMOTE -u CRYPTA_DEMO -u CRYPTA_BIND \
+		-u TELEGRAM_BOT_TOKEN -u TELEGRAM_ALLOWED_USERS -u TELEGRAM_REMOTE_DIR -u TELEGRAM_API_BASE \
+		$DOCKER compose "$@"
+}
+
 val() { sed -n "s/^$1=//p" .env | tail -1; }
 profiles=()
 [ -n "$(val CRYPTA_DOMAIN)" ] && profiles+=(--profile https)
 [ -n "$(val TELEGRAM_BOT_TOKEN)" ] && profiles+=(--profile telegram)
 
 say "Building and starting"
-$DOCKER compose ${profiles[@]+"${profiles[@]}"} up -d --build
+compose ${profiles[@]+"${profiles[@]}"} up -d --build
 
 say "Waiting for the server"
 for _ in $(seq 60); do
-	if $DOCKER compose exec -T core wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+	if compose exec -T core wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
 		ok=1
 		break
 	fi
@@ -139,9 +156,15 @@ done
 
 say "Crypta is running at $(val CRYPTA_PUBLIC_URL)"
 [ -n "$(val CRYPTA_DEMO)" ] && echo "Demo mode: files stay on this server. Put your rclone.conf in $DIR, clear CRYPTA_DEMO in .env and run this again to use Google Drive."
-[ -z "$(val CRYPTA_DOMAIN)" ] && echo "No domain set: the app only pairs over plain http on the local network."
+if [ -z "$(val CRYPTA_DOMAIN)" ]; then
+	if [ -n "$(val CRYPTA_DEMO)" ]; then
+		echo "No domain set: the app only pairs over plain http on the local network."
+	else
+		echo "No domain set: the server only listens on this machine. Set CRYPTA_DOMAIN and CRYPTA_PUBLIC_URL in $DIR/.env (or put your own HTTPS proxy in front) and run this again so the phone can reach it."
+	fi
+fi
 echo
-$DOCKER compose exec -T core crypta pair
+compose exec -T core crypta pair
 cat <<DONE
 
 New pairing code:  cd $DIR && $DOCKER compose exec core crypta pair

@@ -96,16 +96,21 @@ func (a *app) fixPaths(cfg *engine.Config) *engine.Config {
 	return cfg
 }
 
-// storageKey identifies where a config stores data, ignoring the Drive
-// login, which changes whenever the token is refreshed.
+// storageKey identifies where a config stores data. Of the Drive login it
+// keeps only the refresh token, which names the account and stays the same
+// when the access token is renewed.
 func storageKey(cfg *engine.Config) string {
 	if cfg == nil {
 		return ""
 	}
 	c := *cfg
+	var tok struct {
+		Refresh string `json:"refresh_token"`
+	}
+	json.Unmarshal(c.Drive.Token, &tok)
 	c.Drive.Token, c.Drive.ClientID, c.Drive.ClientSecret = nil, "", ""
 	b, _ := json.Marshal(c)
-	return string(b)
+	return string(b) + tok.Refresh
 }
 
 func (a *app) apply(s saved) error {
@@ -212,12 +217,33 @@ func NormalizeServer(s string) (string, error) {
 	if u.Scheme == "http" {
 		host := u.Hostname()
 		ip, err := netip.ParseAddr(host)
-		lanName := err != nil && (!strings.Contains(host, ".") || strings.HasSuffix(host, ".local"))
-		if !lanName && (err != nil || !(ip.IsLoopback() || ip.IsPrivate())) {
+		local := err == nil && (ip.IsLoopback() || ip.IsPrivate())
+		if err != nil && (!strings.Contains(host, ".") || strings.HasSuffix(host, ".local")) {
+			local = resolvesLocally(host)
+		}
+		if !local {
 			return "", errors.New("use an https:// address; http is only allowed for local network addresses")
 		}
 	}
 	return s, nil
+}
+
+// resolvesLocally reports whether a name points only at this device or
+// the local network.
+func resolvesLocally(host string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, ip := range addrs {
+		ip = ip.Unmap()
+		if !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *app) pair(ctx context.Context, server, code, name string) error {

@@ -60,10 +60,16 @@ say "Fetching Crypta into $DIR"
 # so it is neither written to .git/config nor visible in the process list.
 # Saved logins are bypassed: they must not win over the token or store it.
 git_auth() {
-	if [ -z "${GITHUB_TOKEN:-}" ]; then
+	local origin=$URL
+	[ -d "$DIR/.git" ] && origin=$(git -C "$DIR" remote get-url origin)
+	# The token is for GitHub only; another origin keeps its own login.
+	case ${GITHUB_TOKEN:+$origin} in
+	https://github.com/*) ;;
+	*)
 		git "$@"
 		return
-	fi
+		;;
+	esac
 	local helper rc=0
 	helper=$(mktemp)
 	cat >"$helper" <<'ASKPASS'

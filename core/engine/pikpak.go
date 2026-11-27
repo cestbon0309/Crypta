@@ -58,6 +58,9 @@ func (m *Manager) pikpakDir(id string) string {
 // and queues an upload for every file in it. pikpakcli resumes what an
 // earlier run left unfinished.
 func (m *Manager) pull(ctx context.Context, t *Transfer) error {
+	if m.PikPak == nil {
+		return errors.New("PikPak is not set up on this server")
+	}
 	dir := m.pikpakDir(t.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

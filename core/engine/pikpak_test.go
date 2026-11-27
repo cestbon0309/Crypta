@@ -30,6 +30,10 @@ func TestPikPakJobs(t *testing.T) {
 	if _, err := m.Add(Transfer{Kind: KindURL, URL: "pikpak:/a.bin"}); err == nil {
 		t.Fatal("accepted without a PikPak account")
 	}
+	// A job saved while PikPak was on, run after it was turned off.
+	if err := m.pull(t.Context(), &Transfer{ID: "x", Source: "/a.bin"}); err == nil {
+		t.Fatal("ran without a PikPak account")
+	}
 	bin := filepath.Join(dir, "pikpakcli")
 	if err := os.WriteFile(bin, []byte(fakePikPak), 0o755); err != nil {
 		t.Fatal(err)

@@ -231,6 +231,20 @@ struct SettingsView: View {
             } footer: {
                 Text("打开后，图片会显示缩略图。文件是加密保存的，所以第一次显示时要把图片下载下来才能生成缩略图（超过 30 MB 的图片除外），之后会保存在本机。")
             }
+            Section {
+                Picker("同时上传的分片数", selection: Binding(
+                    get: { model.setup.parallel },
+                    set: { n in
+                        model.setup.parallel = n
+                        Task { if let s: SetupStatus = try? await model.api?.post("api/setup/parallel", ["parallel": n]) { model.setup = s } }
+                    })) {
+                    ForEach([1, 2, 4, 6, 8, 12, 16], id: \.self) { Text("\($0)").tag($0) }
+                }
+            } header: {
+                Text("上传")
+            } footer: {
+                Text("超过 256 MB 的文件会按 rclone chunker 的格式切成分片，几片同时上传。数值越大越快，占用的内存也越多（每片约 16 MB）。对新开始的上传生效。")
+            }
             Section("存储") {
                 LabeledContent("当前", value: model.setup.demo ? "演示模式（仅本机）" : "Google Drive（rclone crypt）")
                 NavigationLink { ImportView() } label: { Label("导入 rclone.conf", systemImage: "doc.badge.gearshape") }

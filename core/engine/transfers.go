@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -44,6 +45,24 @@ const (
 // of remote.ChunkAlign. Each running upload holds one chunk in memory.
 var uploadChunk int64 = 128 * 1024 * 1024
 
+// partRequest is the same for the chunks of a chunked file, which are sent
+// side by side, each holding one request in memory.
+var partRequest int64 = 16 * 1024 * 1024
+
+// DefaultParallel and MaxParallel bound how many chunks of one chunked file
+// are uploaded at once.
+const (
+	DefaultParallel = 8
+	MaxParallel     = 16
+)
+
+// Part is the upload state of one chunk of a chunked file.
+type Part struct {
+	Nonce   []byte `json:"nonce,omitempty"`
+	Session string `json:"session,omitempty"`
+	Done    bool   `json:"done,omitempty"`
+}
+
 // Transfer is one job. It is persisted after every chunk so that a killed
 // process continues where it stopped.
 type Transfer struct {
@@ -69,6 +88,8 @@ type Transfer struct {
 	Nonce   []byte    `json:"nonce,omitempty"`
 	Session string    `json:"session,omitempty"`
 	SrcMod  time.Time `json:"srcMod,omitzero"`
+	// Parts is set once the name of a chunked upload has been taken.
+	Parts []*Part `json:"parts,omitempty"`
 	// ETag or Last-Modified of a partly fetched URL, sent as If-Range.
 	Validator string `json:"validator,omitempty"`
 
@@ -87,6 +108,7 @@ type Manager struct {
 	wake      chan struct{}
 	lastSave  time.Time
 	Workers   int
+	parallel int
 	// RetryDelay is the base wait before a failed upload chunk is retried.
 	RetryDelay time.Duration
 	// AllowPrivateURLs lets URL jobs reach loopback, private and link-local
@@ -126,7 +148,7 @@ var publicClient = &http.Client{Transport: &http.Transport{
 // path changes between launches).
 func NewManager(stateDir, filesDir string) (*Manager, error) {
 	m := &Manager{stateFile: filepath.Join(stateDir, "transfers.json"), filesDir: filesDir, workDir: filepath.Join(stateDir, "work"),
-		items: map[string]*Transfer{}, wake: make(chan struct{}, 1), Workers: 2, RetryDelay: 2 * time.Second}
+		items: map[string]*Transfer{}, wake: make(chan struct{}, 1), Workers: 2, parallel: DefaultParallel, RetryDelay: 2 * time.Second}
 	if err := os.MkdirAll(m.workDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -244,6 +266,14 @@ func (m *Manager) cleanup(t *Transfer) {
 		os.Remove(m.abs(t.Local))
 		m.prune(m.abs(t.Local))
 	}
+	if len(t.Parts) > 0 && t.State == StateCanceled && m.fs != nil {
+		// The chunks sent so far are not a file and never will be.
+		go func(fs *FS, p string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			fs.dropChunksAt(ctx, p)
+		}(m.fs, t.Remote)
+	}
 	if t.Kind == KindPikPak && t.State == StateCanceled {
 		os.RemoveAll(m.pikpakDir(t.ID))
 	}
@@ -304,6 +334,103 @@ func (m *Manager) update(t *Transfer, fn func()) {
 	m.mu.Unlock()
 }
 
+// Parallel is how many chunks of one chunked file are uploaded at once.
+func (m *Manager) Parallel() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.parallel
+}
+
+// SetParallel changes it for the uploads that start from now on.
+func (m *Manager) SetParallel(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.parallel = min(max(n, 1), MaxParallel)
+}
+
+// claim picks the remote name of a new upload and calls start with it while
+// the name cannot be taken by anything else. An upload never overwrites: a
+// name that is taken, by a file or by an upload still under way, becomes
+// "name (2).ext".
+func (m *Manager) claim(ctx context.Context, t *Transfer, fs *FS, start func(dc *dirCache, parent, name string) error) error {
+	m.naming.Lock()
+	defer m.naming.Unlock()
+	parent, name := split(Clean(t.Remote))
+	// Taken before listing: an upload that finishes in between is then in
+	// one of the two.
+	busy := m.uploading(t.ID)
+	items, dc, err := fs.list(ctx, parent, true, true)
+	if err != nil {
+		return err
+	}
+	ext := path.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for i := 2; items[name] != nil || busy[path.Join(parent, name)]; i++ {
+		name = fmt.Sprintf("%s (%d)%s", stem, i, ext)
+	}
+	return start(dc, parent, name)
+}
+
+// plainAt is how many plain bytes the first enc encrypted bytes cover.
+func plainAt(enc int64) int64 {
+	enc -= crypt.HeaderSize
+	if enc <= 0 {
+		return 0
+	}
+	blocks, rem := enc/crypt.BlockSize, enc%crypt.BlockSize
+	return blocks*crypt.BlockData + max(0, rem-crypt.BlockOverhead)
+}
+
+// send encrypts src (size plain bytes) and sends it through an upload
+// session, starting at the encrypted offset, request bytes at a time. report
+// gets the plain bytes sent so far; stored says they are confirmed.
+func (m *Manager) send(ctx context.Context, fs *FS, src io.ReaderAt, size int64, nonce crypt.Nonce, session string, offset, request int64, report func(plain int64, stored bool)) error {
+	total := crypt.EncryptedSize(size)
+	buf := make([]byte, min(request, total))
+	retries := 0
+	for {
+		n, err := fs.C.EncryptAt(src, size, nonce, offset, buf)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		at := offset
+		done, err := fs.R.UploadChunk(remote.WithSent(ctx, func(sent int64) { report(plainAt(at+sent), false) }),
+			session, offset, buf[:n], total)
+		if err != nil {
+			if errors.Is(err, remote.ErrSessionGone) {
+				return err
+			}
+			// The chunk may have been stored partly; ask where to go on.
+			if retries++; retries > 5 || ctx.Err() != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(retries) * m.RetryDelay):
+			}
+			off, fin, serr := fs.R.UploadStatus(ctx, session, total)
+			if serr != nil {
+				return err
+			}
+			if fin {
+				return nil
+			}
+			offset = off
+			continue
+		}
+		retries = 0
+		offset += int64(n)
+		report(plainAt(offset), true)
+		if done {
+			return nil
+		}
+		if offset >= total {
+			return errors.New("remote did not confirm the upload")
+		}
+	}
+}
+
 func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 	src, err := os.Open(m.abs(t.Local))
 	if err != nil {
@@ -318,10 +445,16 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 		return errors.New("folders cannot be uploaded as one job")
 	}
 	size := fi.Size()
+	same := t.SrcMod.Equal(fi.ModTime()) && t.Size == size
+	// A file above the chunk size goes up as chunks, like rclone's chunker
+	// stores it. One whose name was taken before keeps the way it started.
+	if len(t.Parts) > 0 && same || (t.Session == "" || !same) && size > fs.ChunkSize {
+		return m.uploadParts(ctx, t, fs, src, fi)
+	}
 	total := crypt.EncryptedSize(size)
 	offset := int64(0)
 	resumed := false
-	if t.Session != "" && len(t.Nonce) == crypt.NonceSize && t.SrcMod.Equal(fi.ModTime()) && t.Size == size {
+	if t.Session != "" && len(t.Nonce) == crypt.NonceSize && same {
 		off, done, err := fs.R.UploadStatus(ctx, t.Session, total)
 		if err == nil {
 			if done {
@@ -335,97 +468,213 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 		}
 	}
 	if !resumed {
+		if len(t.Parts) > 0 {
+			// The source changed and is now small: its old chunks go.
+			if err := fs.dropChunksAt(ctx, t.Remote); err != nil {
+				return err
+			}
+		}
 		nonce, err := crypt.NewNonce()
 		if err != nil {
 			return err
 		}
-		// An upload never overwrites: a name that is taken, by a file or
-		// by an upload still under way, becomes "name (2).ext".
-		m.naming.Lock()
-		parent, name := split(Clean(t.Remote))
-		// Taken before listing: an upload that finishes in between is
-		// then in one of the two.
-		busy := m.uploading(t.ID)
-		items, dc, err := fs.list(ctx, parent, true, true)
-		if err != nil {
-			m.naming.Unlock()
-			return err
-		}
-		ext := path.Ext(name)
-		stem := strings.TrimSuffix(name, ext)
-		for i := 2; items[name] != nil || busy[path.Join(parent, name)]; i++ {
-			name = fmt.Sprintf("%s (%d)%s", stem, i, ext)
-		}
-		session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), "", total, fi.ModTime())
-		if err != nil {
-			m.naming.Unlock()
-			return err
-		}
-		m.update(t, func() {
-			t.Remote, t.Name = path.Join(parent, name), name
-			t.Nonce, t.Session, t.SrcMod, t.Size, t.Done = nonce[:], session, fi.ModTime(), size, 0
+		err = m.claim(ctx, t, fs, func(dc *dirCache, parent, name string) error {
+			session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), "", total, fi.ModTime())
+			if err != nil {
+				return err
+			}
+			m.update(t, func() {
+				t.Remote, t.Name, t.Parts = path.Join(parent, name), name, nil
+				t.Nonce, t.Session, t.SrcMod, t.Size, t.Done = nonce[:], session, fi.ModTime(), size, 0
+			})
+			return nil
 		})
-		m.naming.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	m.update(t, func() { t.Phase = "uploading" })
 	var nonce crypt.Nonce
 	copy(nonce[:], t.Nonce)
-	buf := make([]byte, min(uploadChunk, total))
 	pr := &progress{m: m, t: t}
-	// Plain bytes covered by the first enc encrypted ones.
-	plainAt := func(enc int64) int64 {
-		enc -= crypt.HeaderSize
-		if enc <= 0 {
-			return 0
-		}
-		blocks, rem := enc/crypt.BlockSize, enc%crypt.BlockSize
-		return blocks*crypt.BlockData + max(0, rem-crypt.BlockOverhead)
+	err = m.send(ctx, fs, src, size, nonce, t.Session, offset, uploadChunk, pr.set)
+	if errors.Is(err, remote.ErrSessionGone) {
+		m.update(t, func() { t.Session = "" })
 	}
-	retries := 0
-	for {
-		n, err := fs.C.EncryptAt(src, size, nonce, offset, buf)
-		if err != nil && err != io.EOF {
-			return err
-		}
-		at := offset
-		done, err := fs.R.UploadChunk(remote.WithSent(ctx, func(sent int64) { pr.set(plainAt(at+sent), false) }),
-			t.Session, offset, buf[:n], total)
-		if err != nil {
-			if errors.Is(err, remote.ErrSessionGone) {
-				m.update(t, func() { t.Session = "" })
-				return err
-			}
-			// The chunk may have been stored partly; ask where to go on.
-			if retries++; retries > 5 || ctx.Err() != nil {
-				return err
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(retries) * m.RetryDelay):
-			}
-			off, fin, serr := fs.R.UploadStatus(ctx, t.Session, total)
-			if serr != nil {
-				return err
-			}
-			if fin {
-				break
-			}
-			offset = off
-			continue
-		}
-		retries = 0
-		offset += int64(n)
-		pr.set(plainAt(offset), true)
-		if done {
-			break
-		}
-		if offset >= total {
-			return errors.New("remote did not confirm the upload")
-		}
+	if err != nil {
+		return err
 	}
 	parent, _ := split(Clean(t.Remote))
 	fs.invalidate(parent)
+	return nil
+}
+
+// uploadParts stores a file as rclone chunker does: chunks of fs.ChunkSize,
+// m.Parallel of them on their way at a time, then the metadata object that
+// makes them one file.
+func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.File, fi os.FileInfo) error {
+	size, mod, chunk := fi.Size(), fi.ModTime(), fs.ChunkSize
+	count := int((size + chunk - 1) / chunk)
+	if len(t.Parts) != count || !t.SrcMod.Equal(mod) || t.Size != size {
+		err := m.claim(ctx, t, fs, func(dc *dirCache, parent, name string) error {
+			// Chunks under this name are leftovers of an upload given up.
+			if err := fs.dropChunks(ctx, dc.id, name); err != nil {
+				return err
+			}
+			parts := make([]*Part, count)
+			for i := range parts {
+				parts[i] = &Part{}
+			}
+			m.update(t, func() {
+				t.Remote, t.Name, t.Parts = path.Join(parent, name), name, parts
+				t.Nonce, t.Session, t.SrcMod, t.Size, t.Done = nil, "", mod, size, 0
+			})
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	parent, name := split(Clean(t.Remote))
+	dc, err := fs.dir(ctx, parent, true)
+	if err != nil {
+		return err
+	}
+	m.update(t, func() { t.Phase = "uploading" })
+
+	// rclone records the MD5 of the whole file; it is read alongside.
+	sum := make(chan string, 1)
+	go func() {
+		h := md5.New()
+		if _, err := io.Copy(h, io.NewSectionReader(src, 0, size)); err != nil {
+			sum <- ""
+			return
+		}
+		sum <- hex.EncodeToString(h.Sum(nil))
+	}()
+
+	partSize := func(i int) int64 { return min(chunk, size-int64(i)*chunk) }
+	pr := &progress{m: m, t: t}
+	var mu sync.Mutex
+	sent := make([]int64, count)
+	m.mu.Lock()
+	for i, p := range t.Parts {
+		if p.Done {
+			sent[i] = partSize(i)
+		}
+	}
+	m.mu.Unlock()
+	report := func(i int, plain int64, stored bool) {
+		mu.Lock()
+		sent[i] = plain
+		var all int64
+		for _, n := range sent {
+			all += n
+		}
+		mu.Unlock()
+		pr.set(all, stored)
+	}
+
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var first error
+	slots := make(chan struct{}, m.Parallel())
+	for i := range t.Parts {
+		if sent[i] > 0 {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case slots <- struct{}{}:
+			case <-pctx.Done():
+				return
+			}
+			defer func() { <-slots }()
+			err := m.sendPart(pctx, t, fs, dc.id, name, i, io.NewSectionReader(src, int64(i)*chunk, partSize(i)), mod,
+				func(plain int64, stored bool) { report(i, plain, stored) })
+			if err != nil {
+				mu.Lock()
+				if first == nil {
+					first = err
+				}
+				mu.Unlock()
+				cancel()
+			}
+		}()
+	}
+	wg.Wait()
+	if first != nil {
+		return first
+	}
+	hash := <-sum
+	if hash == "" {
+		return errors.New("could not read the file for its checksum")
+	}
+	meta := fmt.Sprintf(`{"ver":1,"size":%d,"nchunks":%d,"md5":"%s"}`, size, count, hash)
+	nonce, err := crypt.NewNonce()
+	if err != nil {
+		return err
+	}
+	session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), "", crypt.EncryptedSize(int64(len(meta))), mod)
+	if err != nil {
+		return err
+	}
+	if err := m.send(ctx, fs, strings.NewReader(meta), int64(len(meta)), nonce, session, 0, partRequest, func(int64, bool) {}); err != nil {
+		return err
+	}
+	fs.invalidate(parent)
+	return nil
+}
+
+// sendPart uploads chunk i, going on where an earlier run stopped.
+func (m *Manager) sendPart(ctx context.Context, t *Transfer, fs *FS, dirID, name string, i int, src *io.SectionReader, mod time.Time, report func(int64, bool)) error {
+	m.mu.Lock()
+	p := *t.Parts[i]
+	m.mu.Unlock()
+	size := src.Size()
+	total := crypt.EncryptedSize(size)
+	offset := int64(0)
+	if p.Session != "" && len(p.Nonce) == crypt.NonceSize {
+		off, done, err := fs.R.UploadStatus(ctx, p.Session, total)
+		switch {
+		case err == nil && done:
+			m.update(t, func() { t.Parts[i].Done, t.Parts[i].Session = true, "" })
+			report(size, true)
+			return nil
+		case err == nil:
+			offset = off
+		case errors.Is(err, remote.ErrSessionGone):
+			p.Session = ""
+		default:
+			return err
+		}
+	} else {
+		p.Session = ""
+	}
+	if p.Session == "" {
+		nonce, err := crypt.NewNonce()
+		if err != nil {
+			return err
+		}
+		if p.Session, err = fs.R.StartUpload(ctx, dirID, fs.C.EncryptName(chunkFile(name, i), false), "", total, mod); err != nil {
+			return err
+		}
+		p.Nonce = nonce[:]
+		m.update(t, func() { t.Parts[i].Nonce, t.Parts[i].Session = p.Nonce, p.Session })
+	}
+	var nonce crypt.Nonce
+	copy(nonce[:], p.Nonce)
+	err := m.send(ctx, fs, src, size, nonce, p.Session, offset, partRequest, report)
+	if errors.Is(err, remote.ErrSessionGone) {
+		m.update(t, func() { t.Parts[i].Session = "" })
+	}
+	if err != nil {
+		return err
+	}
+	m.update(t, func() { t.Parts[i].Done, t.Parts[i].Session = true, "" })
 	return nil
 }
 
@@ -674,7 +923,7 @@ func (m *Manager) uploading(id string) map[string]bool {
 	defer m.mu.Unlock()
 	busy := map[string]bool{}
 	for _, t := range m.items {
-		if t.ID != id && t.Kind != KindDownload && t.Session != "" &&
+		if t.ID != id && t.Kind != KindDownload && (t.Session != "" || len(t.Parts) > 0) &&
 			t.State != StateDone && t.State != StateCanceled {
 			busy[t.Remote] = true
 		}
@@ -763,7 +1012,7 @@ func (m *Manager) List() []Transfer {
 	out := make([]Transfer, 0, len(m.items))
 	for _, t := range m.items {
 		cp := *t
-		cp.Session, cp.Nonce = "", nil // resume secrets stay on disk
+		cp.Session, cp.Nonce, cp.Parts = "", nil, nil // resume secrets stay on disk
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })

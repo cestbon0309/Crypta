@@ -23,6 +23,9 @@ type Config struct {
 	// (the part after the colon in the crypt remote's "remote = gdrive:path").
 	Path  string        `json:"path"`
 	Crypt crypt.Options `json:"crypt"`
+	// ChunkSize is the chunk_size of the rclone chunker remote on top of
+	// the crypt remote; 0 means DefaultChunkSize.
+	ChunkSize int64 `json:"chunkSize,omitempty"`
 }
 
 type iniSection map[string]string
@@ -98,6 +101,9 @@ func FromRcloneConf(conf, name string) (*Config, error) {
 	}
 	cfg := &Config{Backend: "drive", Path: strings.Trim(path, "/")}
 	var err error
+	if cfg.ChunkSize, err = chunkerOf(secs, name); err != nil {
+		return nil, err
+	}
 	if cfg.Crypt.Password, err = crypt.Reveal(cs["password"]); err != nil {
 		return nil, err
 	}

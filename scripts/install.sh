@@ -94,11 +94,33 @@ else
 fi
 cd "$DIR"
 
+val() { sed -n "s/^$1=//p" .env | tail -1; }
+
+# A domain is often typed as an address: https://example.com/ means example.com.
+domain_of() {
+	local d=${1//[[:space:]]/}
+	d=${d#*://}
+	printf '%s' "${d%%/*}"
+}
+
 if [ -f .env ]; then
 	say "Keeping the existing $DIR/.env"
+	# Repair a domain an earlier version saved together with its scheme.
+	old=$(val CRYPTA_DOMAIN)
+	new=$(domain_of "$old")
+	if [ "$old" != "$new" ]; then
+		say "Correcting the domain in .env to $new"
+		(
+			umask 077
+			sed -e "s|^CRYPTA_DOMAIN=.*|CRYPTA_DOMAIN=$new|" \
+				-e "s|^CRYPTA_PUBLIC_URL=https://$old\$|CRYPTA_PUBLIC_URL=https://$new|" .env >.env.new
+		)
+		mv .env.new .env
+	fi
 else
 	say "Configuring"
-	ask CRYPTA_DOMAIN "Domain pointing at this server (empty: no HTTPS, local network only)"
+	ask CRYPTA_DOMAIN "Domain pointing at this server, e.g. crypta.example.com (empty: no HTTPS, local network only)"
+	CRYPTA_DOMAIN=$(domain_of "$CRYPTA_DOMAIN")
 	ask RCLONE_CONF "Path to rclone.conf with your crypt remote (empty: demo mode without Google Drive)"
 	ask TELEGRAM_BOT_TOKEN "Telegram bot token (empty: no Telegram plugin)"
 	if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
@@ -152,7 +174,6 @@ compose() {
 		$DOCKER compose "$@"
 }
 
-val() { sed -n "s/^$1=//p" .env | tail -1; }
 profiles=()
 [ -n "$(val CRYPTA_DOMAIN)" ] && profiles+=(--profile https)
 [ -n "$(val TELEGRAM_BOT_TOKEN)" ] && profiles+=(--profile telegram)

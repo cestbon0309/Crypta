@@ -88,7 +88,8 @@ func Start(stateDir, filesDir string) (string, error) {
 		inner.ServeHTTP(w, r)
 	})
 	alive = func(addr string) bool {
-		c := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+		c := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		res, err := c.Get("http://" + addr + "/core-id")
 		if err != nil {
 			return false

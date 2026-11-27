@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -90,12 +91,20 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	if user := os.Getenv("PIKPAK_USERNAME"); user != "" {
+		if bin, err := exec.LookPath("pikpakcli"); err != nil {
+			fmt.Fprintln(os.Stderr, "crypta: PIKPAK_USERNAME is set but pikpakcli is not installed; PikPak downloads are off")
+		} else if tm.PikPak, err = engine.NewPikPak(bin, filepath.Join(stateDir, "pikpak"), user, os.Getenv("PIKPAK_PASSWORD"), os.Getenv("PIKPAK_PROXY")); err != nil {
+			return err
+		}
+	}
 	store := &auth.Store{Path: filepath.Join(stateDir, "auth.json")}
 	admin := adminToken()
 	srv := &api.Server{
 		Transfers: tm,
 		LocalRoot: downloads,
 		Dashboard: true,
+		PikPak:    tm.PikPak != nil,
 		Auth:      func(t string) bool { return api.SameToken(t, admin) || store.Valid(t) },
 		Extra: func(mux *http.ServeMux, s *api.Server) {
 			// The only unauthenticated call: trade a one-time code for a

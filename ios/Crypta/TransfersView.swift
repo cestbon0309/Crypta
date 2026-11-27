@@ -133,12 +133,12 @@ struct ServerJobsView: View {
     private var jobList: some View {
         List {
             Section {
-                TextField("下载链接 https://…", text: $link)
+                TextField("下载链接 https://… 或 pikpak:/网盘路径", text: $link)
                     .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("保存到（网盘内文件夹，可留空）", text: $folder)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 Button("添加离线下载") { add() }
-                    .disabled(URL(string: link.trimmingCharacters(in: .whitespaces))?.scheme?.hasPrefix("http") != true)
+                    .disabled(!Self.accepts(link.trimmingCharacters(in: .whitespaces)))
             } footer: {
                 if let error { Text(error).foregroundStyle(.red) }
                 else { Text("服务器下载完成后会直接加密上传到 Google Drive，手机不用保持连接。") }
@@ -167,6 +167,11 @@ struct ServerJobsView: View {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
         }
+    }
+
+    /// A link, or a file or folder of the PikPak account set up on the server.
+    private static func accepts(_ link: String) -> Bool {
+        link.hasPrefix("pikpak:") && link.count > 7 || URL(string: link)?.scheme?.hasPrefix("http") == true
     }
 
     private func refresh() async {

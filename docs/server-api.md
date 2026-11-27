@@ -28,6 +28,15 @@ POST /api/transfers
 {"kind": "url", "url": "https://example.com/file.zip", "remote": "Downloads"}
 ```
 
+PikPak 网盘里的文件或文件夹也用同一个接口，链接写成 `pikpak:/网盘路径`（服务器要先在 `.env` 里填 `PIKPAK_USERNAME` 和 `PIKPAK_PASSWORD`）：
+
+```http
+POST /api/transfers
+{"kind": "url", "url": "pikpak:/Movies/video.mkv", "remote": "Downloads"}
+```
+
+核心用 pikpakcli 把它下载到 `/downloads/pikpak/`，再给里面每个文件各建一个上传任务，文件夹结构保持不变。
+
 返回值里的 `id` 用来查进度。`plugins/telegram/bot.py` 是一个完整的例子。
 
 ## 任务

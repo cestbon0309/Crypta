@@ -15,6 +15,8 @@
 #   CRYPTA_REMOTE           name of the crypt remote, if the file has several
 #   TELEGRAM_BOT_TOKEN      enables the Telegram plugin
 #   TELEGRAM_ALLOWED_USERS  comma separated numeric Telegram user ids
+#   PIKPAK_USERNAME         PikPak account; enables pikpak:/path offline downloads
+#   PIKPAK_PASSWORD         its password
 #   CRYPTA_YES=1            never ask, use the values above
 set -euo pipefail
 
@@ -36,6 +38,18 @@ ask() { # ask VAR "question" [default]
 	fi
 	read -r -p "$q${def:+ [$def]}: " ans </dev/tty || ans=
 	printf -v "$var" '%s' "${ans:-$def}"
+}
+
+ask_secret() { # like ask, without showing what is typed
+	local var=$1 q=$2 ans
+	if [ -n "${!var+x}" ]; then return; fi
+	if [ "${CRYPTA_YES:-}" = 1 ] || ! { : </dev/tty; } 2>/dev/null; then
+		printf -v "$var" ''
+		return
+	fi
+	read -r -s -p "$q: " ans </dev/tty || ans=
+	echo >/dev/tty
+	printf -v "$var" '%s' "$ans"
 }
 
 SUDO=
@@ -129,6 +143,13 @@ else
 	if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
 		ask TELEGRAM_ALLOWED_USERS "Telegram user ids allowed to use the bot, comma separated"
 	fi
+	ask PIKPAK_USERNAME "PikPak account, email or phone number with country code (empty: no PikPak downloads)"
+	if [ -n "$PIKPAK_USERNAME" ]; then
+		ask_secret PIKPAK_PASSWORD "PikPak password"
+	fi
+	case ${PIKPAK_USERNAME:-}${PIKPAK_PASSWORD:-} in
+	*"'"* | *$'\n'*) die "a PikPak account or password with a single quote cannot be written by this installer; leave PikPak empty and add it to $DIR/.env yourself" ;;
+	esac
 
 	demo=
 	if [ -n "$RCLONE_CONF" ]; then
@@ -167,6 +188,9 @@ TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
 TELEGRAM_ALLOWED_USERS=${TELEGRAM_ALLOWED_USERS:-}
 TELEGRAM_REMOTE_DIR=Telegram
 TELEGRAM_API_BASE=
+PIKPAK_USERNAME='${PIKPAK_USERNAME:-}'
+PIKPAK_PASSWORD='${PIKPAK_PASSWORD:-}'
+PIKPAK_PROXY=
 ENV
 fi
 
@@ -174,6 +198,7 @@ fi
 compose() {
 	env -u CRYPTA_PUBLIC_URL -u CRYPTA_DOMAIN -u RCLONE_CONF -u CRYPTA_REMOTE -u CRYPTA_DEMO -u CRYPTA_BIND \
 		-u TELEGRAM_BOT_TOKEN -u TELEGRAM_ALLOWED_USERS -u TELEGRAM_REMOTE_DIR -u TELEGRAM_API_BASE \
+		-u PIKPAK_USERNAME -u PIKPAK_PASSWORD -u PIKPAK_PROXY \
 		$DOCKER compose "$@"
 }
 

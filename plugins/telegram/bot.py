@@ -69,7 +69,7 @@ def progress(phase: str, name: str, done: int | None, size: int, speed: int = 0)
     elif size:
         frac = min(done / size, 1)
         filled = int(frac * BAR)
-        lines.append(f"{'▓' * filled}{'░' * (BAR - filled)} {frac * 100:.0f}%")
+        lines.append(f"{'🟩' * filled}{'⬜' * (BAR - filled)} {frac * 100:.0f}%")
         lines.append(f"{human(done)} / {human(size)}" + (f" · {human(speed)}/s" if speed > 0 else ""))
     else:
         lines.append(human(done) + (f" · {human(speed)}/s" if speed > 0 else ""))

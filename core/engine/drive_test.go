@@ -77,7 +77,7 @@ func TestDriveResume(t *testing.T) {
 	for {
 		if s := waitState(t, m, tr.ID, StateRunning, StateDone); s.State == StateDone {
 			t.Fatal("upload finished before it could be interrupted")
-		} else if s.Done > 16*1024*1024 {
+		} else if srv.Accepted() > 16*1024*1024 { // stored, not merely on its way
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -155,5 +155,123 @@ func TestDriveResume(t *testing.T) {
 	items, _ = fs.List(ctx, "", true)
 	if len(items) != 1 || items[0].Name != "other" {
 		t.Fatalf("root: %+v", items)
+	}
+}
+
+// A chunked upload that dies half way keeps the chunks that are stored and
+// goes on inside the ones that are not; a canceled one leaves nothing.
+func TestDriveChunkedResume(t *testing.T) {
+	srv := fakedrive.New()
+	defer srv.Close()
+	cfg := &Config{Backend: "drive", Path: "enc", Crypt: crypt.Options{Password: "pw"}, ChunkSize: 4 << 20,
+		Drive: remote.DriveConfig{ClientID: "id", Token: json.RawMessage(`{"refresh_token":"rt"}`), APIBase: srv.URL, TokenURL: srv.URL + "/token"}}
+	dir := t.TempDir()
+	files := filepath.Join(dir, "files")
+	os.MkdirAll(files, 0o755)
+	defer func(n int64) { partRequest = n }(partRequest)
+	partRequest = 1 << 20
+	data := randBytes(30<<20 + 999)
+	os.WriteFile(filepath.Join(files, "movie.mkv"), data, 0o644)
+	start := func() (*Manager, *FS, context.CancelFunc) {
+		fs, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := NewManager(filepath.Join(dir, "state"), files)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.SetParallel(3)
+		ctx, cancel := context.WithCancel(context.Background())
+		m.SetFS(fs)
+		go m.Run(ctx)
+		return m, fs, cancel
+	}
+	interrupt := func(m *Manager, id string) {
+		for {
+			if s := waitState(t, m, id, StateRunning, StateDone); s.State == StateDone {
+				t.Fatal("upload finished before it could be interrupted")
+			} else if s.Done > 12<<20 {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	m, _, cancel := start()
+	tr, err := m.Add(Transfer{Kind: KindUpload, Local: "movie.mkv", Remote: "videos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupt(m, tr.ID)
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+
+	stored := srv.Accepted()
+	m, fs, cancel := start()
+	defer cancel()
+	ctx := context.Background()
+	if items, _ := fs.List(ctx, "videos", true); len(items) != 0 {
+		t.Fatalf("unfinished chunked upload is listed: %+v", items)
+	}
+	waitState(t, m, tr.ID, StateDone)
+	if sent := srv.Accepted() - stored; sent > int64(len(data))-8<<20 {
+		t.Fatalf("resume re-sent %d bytes", sent)
+	}
+	it, err := fs.Stat(ctx, "videos/movie.mkv")
+	if err != nil || it.Size != int64(len(data)) || len(it.parts) != 8 {
+		t.Fatalf("stat: %v %+v", err, it)
+	}
+	rc, err := fs.Open(ctx, it, 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatal("resumed chunked upload is corrupt")
+	}
+
+	// Paused, its folder renamed, resumed: the file is whole in the folder
+	// under its new name.
+	tr3, _ := m.Add(Transfer{Kind: KindUpload, Local: "movie.mkv", Remote: "third"})
+	interrupt(m, tr3.ID)
+	m.Act(tr3.ID, "pause")
+	time.Sleep(100 * time.Millisecond)
+	if err := fs.Move(ctx, "third", "fourth"); err != nil {
+		t.Fatal(err)
+	}
+	m.Act(tr3.ID, "resume")
+	waitState(t, m, tr3.ID, StateDone)
+	if _, err := fs.Stat(ctx, "third"); err == nil {
+		t.Fatal("the renamed folder came back")
+	}
+	if it, err = fs.Stat(ctx, "fourth/movie.mkv"); err != nil || it.Size != int64(len(data)) {
+		t.Fatalf("after the rename: %v %+v", err, it)
+	}
+	rc, _ = fs.Open(ctx, it, 0, -1)
+	got, _ = io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatal("upload resumed after a folder rename is corrupt")
+	}
+
+	// Canceled half way: the chunks go, the name stays free.
+	tr2, _ := m.Add(Transfer{Kind: KindUpload, Local: "movie.mkv", Remote: "other"})
+	interrupt(m, tr2.ID)
+	m.Act(tr2.ID, "cancel")
+	dc, err := fs.dir(ctx, "other", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		entries, err := fs.R.List(ctx, dc.id)
+		if err == nil && len(entries) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("canceled upload left %d objects (%v)", len(entries), err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

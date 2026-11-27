@@ -46,6 +46,21 @@ password2 = ...
 - 支持的 crypt 选项：`filename_encryption = standard | off`、`directory_name_encryption`、`filename_encoding = base32 | base64`、`password2`。不支持 `obfuscate` 和 `base32768`。
 - 如果 rclone.conf 设了配置密码，先用 `rclone config show` 导出明文版本。
 
+### 大文件分片
+
+超过 256 MB 的文件按 **rclone chunker 原版格式**存放（`名字.rclone_chunk.001`、`.002`…加一个记录大小和 MD5 的小文件），每片各自加密，几片同时上传（默认 8 片），用来绕开 Google Drive 对单个文件的上传限速。电脑上的 rclone 要读这些文件，在 rclone.conf 里再加一个套在 crypt 远程上面的 chunker 远程，并通过它访问：
+
+```ini
+[crypta-chunked]
+type = chunker
+remote = crypta:
+chunk_size = 256M
+```
+
+- Crypta 读到这一段时用它的 `chunk_size`，没有这一段时按 256 MB；只支持 chunker 的默认命名和元数据格式。
+- 直接用 crypt 远程访问也行，只是大文件会显示成一堆分片。
+- 服务器的并行片数用 `.env` 里的 `CRYPTA_UPLOAD_PARALLEL` 调（1 到 16），手机在“设置”里选。
+
 ## 二、服务器
 
 一行安装（Linux 服务器；没有 Docker 会先装 Docker，然后拉代码、问几个问题生成 `.env`、启动并显示配对码）：

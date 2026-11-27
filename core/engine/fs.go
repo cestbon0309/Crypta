@@ -24,6 +24,9 @@ type Item struct {
 
 	id      string
 	encSize int64
+	// The chunks of a file stored in rclone chunker's way; id is then the
+	// metadata object.
+	parts []*Item
 }
 
 type dirCache struct {
@@ -34,13 +37,15 @@ type dirCache struct {
 
 // FS is the decrypted, path based view of the encrypted folder.
 type FS struct {
-	R      remote.Remote
-	C      *crypt.Cipher
-	base   string
-	mu     sync.Mutex
-	mk     sync.Mutex           // serializes folder creation
-	dirs   map[string]*dirCache // by clean path, "" is the root
-	nonces map[string]crypt.Nonce
+	R remote.Remote
+	C *crypt.Cipher
+	// ChunkSize is the size above which a file is uploaded as chunks.
+	ChunkSize int64
+	base      string
+	mu        sync.Mutex
+	mk        sync.Mutex           // serializes folder creation
+	dirs      map[string]*dirCache // by clean path, "" is the root
+	nonces    map[string]crypt.Nonce
 }
 
 const listTTL = 30 * time.Second
@@ -62,7 +67,11 @@ func New(cfg *Config) (*FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &FS{R: r, C: c, base: strings.Trim(cfg.Path, "/"), dirs: map[string]*dirCache{}, nonces: map[string]crypt.Nonce{}}, nil
+	chunk := cfg.ChunkSize
+	if chunk <= 0 {
+		chunk = DefaultChunkSize
+	}
+	return &FS{R: r, C: c, ChunkSize: chunk, base: strings.Trim(cfg.Path, "/"), dirs: map[string]*dirCache{}, nonces: map[string]crypt.Nonce{}}, nil
 }
 
 func Clean(p string) string {
@@ -242,6 +251,7 @@ func (f *FS) list(ctx context.Context, p string, create, fresh bool) (map[string
 		it.Path = path.Join(p, it.Name)
 		items[it.Name] = it
 	}
+	joinChunks(items)
 	f.mu.Lock()
 	dc.items, dc.at = items, time.Now()
 	// Another client may have replaced files or folders under the same
@@ -331,11 +341,17 @@ func (f *FS) Delete(ctx context.Context, p string) error {
 	if it.id == "" {
 		return errors.New("cannot delete the root folder")
 	}
+	parent, _ := split(it.Path)
+	// The metadata first: without it the chunks are no longer a file.
 	if err := f.R.Delete(ctx, it.id); err != nil {
 		return err
 	}
-	parent, _ := split(it.Path)
 	f.invalidate(parent)
+	for _, part := range it.parts {
+		if err := f.R.Delete(ctx, part.id); err != nil && !errors.Is(err, remote.ErrNotFound) {
+			return err
+		}
+	}
 	f.forget(it.Path)
 	return nil
 }
@@ -366,11 +382,36 @@ func (f *FS) Move(ctx context.Context, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if err := f.R.Move(ctx, it.id, sdc.id, ddc.id, f.C.EncryptName(name, it.IsDir)); err != nil {
-		return err
-	}
 	f.invalidate(srcParent)
 	f.invalidate(dstParent)
+	if len(it.parts) > 0 {
+		// Chunks left under the new name by an upload that was given up.
+		if err := f.dropChunks(ctx, ddc.id, name); err != nil {
+			return err
+		}
+	}
+	_, srcName := split(it.Path)
+	for i, part := range it.parts {
+		err := f.R.Move(ctx, part.id, sdc.id, ddc.id, f.C.EncryptName(chunkFile(name, i), false))
+		if err == nil && i == len(it.parts)-1 {
+			err = f.R.Move(ctx, it.id, sdc.id, ddc.id, f.C.EncryptName(name, false))
+		}
+		if err != nil {
+			// Back with the chunks that went: half a file on each side
+			// is a file on neither.
+			bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			for j := i; j >= 0; j-- {
+				f.R.Move(bctx, it.parts[j].id, ddc.id, sdc.id, f.C.EncryptName(chunkFile(srcName, j), false))
+			}
+			return err
+		}
+	}
+	if len(it.parts) == 0 {
+		if err := f.R.Move(ctx, it.id, sdc.id, ddc.id, f.C.EncryptName(name, it.IsDir)); err != nil {
+			return err
+		}
+	}
 	f.forget(it.Path)
 	return nil
 }
@@ -391,6 +432,14 @@ func (f *FS) Open(ctx context.Context, it *Item, offset, length int64) (io.ReadC
 	if length < 0 || offset+length > it.Size {
 		length = it.Size - offset
 	}
+	if len(it.parts) > 0 {
+		return &partsReader{f: f, ctx: ctx, parts: it.parts, off: offset, left: length}, nil
+	}
+	return f.openPart(ctx, it, offset, length)
+}
+
+// openPart is Open for one crypt file; the range lies inside it.
+func (f *FS) openPart(ctx context.Context, it *Item, offset, length int64) (io.ReadCloser, error) {
 	blk := offset / crypt.BlockData
 	lastBlk := (offset + length - 1) / crypt.BlockData
 	encEnd := crypt.BlockOffset(lastBlk + 1)

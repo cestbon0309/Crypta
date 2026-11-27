@@ -56,6 +56,7 @@ struct SetupStatus: Codable, Equatable {
     var backend = ""
     var server = ""
     var serverToken = ""
+    var parallel = 8
 }
 
 struct APIError: LocalizedError {

@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,11 @@ func Start(stateDir, filesDir string) (string, error) {
 	}
 	token = auth.Random(24)
 	a := &app{stateDir: stateDir}
+	if b, err := os.ReadFile(a.parallelPath()); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			tm.SetParallel(n)
+		}
+	}
 	a.srv = &api.Server{Transfers: tm, Auth: func(t string) bool { return api.SameToken(t, token) }, Extra: a.routes}
 	if b, err := os.ReadFile(a.path()); err == nil {
 		if json.Unmarshal(b, &a.saved) == nil && a.saved.Config != nil {
@@ -142,6 +148,8 @@ func Resume() (string, error) {
 	return started, nil
 }
 
+func (a *app) parallelPath() string { return filepath.Join(a.stateDir, "parallel") }
+
 func (a *app) path() string { return filepath.Join(a.stateDir, "config.json") }
 
 // The app container path changes between installs, so the demo store
@@ -214,7 +222,7 @@ func (a *app) routes(mux *http.ServeMux, s *api.Server) {
 			backend = a.saved.Config.Backend
 		}
 		api.JSON(w, 200, map[string]any{"configured": a.saved.Config != nil, "demo": a.saved.Demo, "backend": backend,
-			"server": a.saved.Server, "serverToken": a.saved.ServerToken})
+			"server": a.saved.Server, "serverToken": a.saved.ServerToken, "parallel": s.Transfers.Parallel()})
 	}
 	mux.HandleFunc("GET /api/setup", s.Authed(func(w http.ResponseWriter, r *http.Request) { reply(w, nil) }))
 	// List the crypt remotes in an rclone.conf so the user can pick one.
@@ -256,6 +264,13 @@ func (a *app) routes(mux *http.ServeMux, s *api.Server) {
 		next := saved{Config: a.saved.Config, Demo: a.saved.Demo}
 		a.mu.Unlock()
 		reply(w, a.apply(next))
+	}))
+	// How many chunks of a large file are uploaded at once.
+	mux.HandleFunc("POST /api/setup/parallel", s.Authed(func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Parallel int }
+		json.NewDecoder(r.Body).Decode(&in)
+		s.Transfers.SetParallel(in.Parallel)
+		reply(w, os.WriteFile(a.parallelPath(), []byte(strconv.Itoa(s.Transfers.Parallel())), 0o600))
 	}))
 	mux.HandleFunc("POST /api/setup/reset", s.Authed(func(w http.ResponseWriter, r *http.Request) {
 		reply(w, a.apply(saved{}))

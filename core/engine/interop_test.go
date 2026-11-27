@@ -220,3 +220,120 @@ func TestWrongPassword(t *testing.T) {
 		t.Fatalf("wrong password listed %d items", len(items))
 	}
 }
+
+const chunkerConf = "[big]\ntype = chunker\nremote = sec:\nchunk_size = 1M\n"
+
+// Files above the chunk size are stored as rclone's chunker stores them.
+func TestChunkerInterop(t *testing.T) {
+	r := newRig(t, chunkerConf, crypt.Options{Password: "pw", Salt: "salt"})
+	r.fs.ChunkSize = 1 << 20
+	defer func(n int64) { partRequest = n }(partRequest)
+	partRequest = 256 * 1024
+	ctx := context.Background()
+
+	// Written by the engine, read by rclone.
+	mine := randBytes(5<<20 + 4321)
+	small := randBytes(1 << 20) // exactly one chunk: stays a plain file
+	os.WriteFile(filepath.Join(r.files, "mine.bin"), mine, 0o644)
+	os.WriteFile(filepath.Join(r.files, "small.bin"), small, 0o644)
+	a, _ := r.m.Add(Transfer{Kind: KindUpload, Local: "mine.bin", Remote: "dir"})
+	b, _ := r.m.Add(Transfer{Kind: KindUpload, Local: "small.bin", Remote: "dir"})
+	r.wait(a.ID)
+	r.wait(b.ID)
+	out := filepath.Join(t.TempDir(), "out")
+	r.rclone("copy", "big:dir", out)
+	for name, want := range map[string][]byte{"mine.bin": mine, "small.bin": small} {
+		if got, _ := os.ReadFile(filepath.Join(out, name)); !bytes.Equal(got, want) {
+			t.Fatalf("rclone read %s differently (%d bytes)", name, len(got))
+		}
+	}
+	r.rclone("check", "--download", r.files, "big:dir")
+	if ls := r.rclone("lsf", "big:dir"); strings.Contains(ls, "rclone_chunk") {
+		t.Fatalf("rclone sees loose chunks: %s", ls)
+	}
+	// The MD5 in the metadata is the one rclone computes.
+	r.rclone("check", r.files, "big:dir")
+
+	// Written by rclone, read by the engine.
+	theirs := randBytes(3<<20 + 77)
+	src := filepath.Join(t.TempDir(), "theirs.bin")
+	os.WriteFile(src, theirs, 0o644)
+	r.rclone("copyto", src, "big:dir/theirs.bin")
+	items, err := r.fs.List(ctx, "dir", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizes := map[string]int64{}
+	for _, it := range items {
+		sizes[it.Name] = it.Size
+	}
+	if len(sizes) != 3 || sizes["theirs.bin"] != int64(len(theirs)) || sizes["mine.bin"] != int64(len(mine)) || sizes["small.bin"] != 1<<20 {
+		t.Fatalf("listing: %v", sizes)
+	}
+	read := func(p string, off, n int64) []byte {
+		it, err := r.fs.Stat(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rc, err := r.fs.Open(ctx, it, off, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rc.Close()
+		got, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if !bytes.Equal(read("dir/theirs.bin", 0, -1), theirs) {
+		t.Fatal("engine read rclone's chunked file differently")
+	}
+	// Ranges that start inside a chunk and cross chunk borders.
+	for _, rg := range [][2]int64{{1<<20 - 5, 10}, {700000, 2 << 20}, {3 << 20, 77}, {3<<20 + 70, 100}} {
+		end := min(rg[0]+rg[1], int64(len(theirs)))
+		if !bytes.Equal(read("dir/theirs.bin", rg[0], rg[1]), theirs[rg[0]:end]) {
+			t.Fatalf("range %v differs", rg)
+		}
+	}
+
+	// Rename, move and delete take the chunks along.
+	if err := r.fs.Move(ctx, "dir/mine.bin", "moved/renamed.bin"); err != nil {
+		t.Fatal(err)
+	}
+	r.rclone("copyto", "big:moved/renamed.bin", filepath.Join(out, "renamed.bin"))
+	if got, _ := os.ReadFile(filepath.Join(out, "renamed.bin")); !bytes.Equal(got, mine) {
+		t.Fatal("moved file differs")
+	}
+	if err := r.fs.Delete(ctx, "moved/renamed.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.fs.Delete(ctx, "dir/theirs.bin"); err != nil {
+		t.Fatal(err)
+	}
+	if ls := strings.TrimSpace(r.rclone("lsf", "-R", "--files-only", "sec:")); ls != "dir/small.bin" {
+		t.Fatalf("left behind: %q", ls)
+	}
+}
+
+func TestChunkerConf(t *testing.T) {
+	base := "[d]\ntype = drive\ntoken = {\"access_token\":\"a\",\"refresh_token\":\"r\"}\n[sec]\ntype = crypt\nremote = d:x\npassword = " + "" + "\n"
+	ini := func(s string) map[string]iniSection {
+		secs, _ := parseINI(s)
+		return secs
+	}
+	if n, err := chunkerOf(ini(base+"[big]\ntype = chunker\nremote = sec:\nchunk_size = 256M\n"), "sec"); err != nil || n != 256<<20 {
+		t.Fatal(n, err)
+	}
+	if n, _ := chunkerOf(ini(base), "sec"); n != 0 {
+		t.Fatal(n)
+	}
+	if _, err := chunkerOf(ini(base+"[big]\ntype = chunker\nremote = sec:\nname_format = *.part##\n"), "sec"); err == nil {
+		t.Fatal("custom name_format accepted")
+	}
+	for in, want := range map[string]int64{"2G": 2 << 30, "100": 100 << 10, "1Mi": 1 << 20, "512B": 512, "1.5M": 3 << 19} {
+		if got, err := parseSize(in); err != nil || got != want {
+			t.Fatal(in, got, err)
+		}
+	}
+}

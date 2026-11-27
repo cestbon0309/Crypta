@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -90,6 +91,13 @@ func serve() error {
 	}
 	if err != nil {
 		return err
+	}
+	if v := os.Getenv("CRYPTA_UPLOAD_PARALLEL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return fmt.Errorf("CRYPTA_UPLOAD_PARALLEL must be a number from 1 to %d", engine.MaxParallel)
+		}
+		tm.SetParallel(n)
 	}
 	if user := os.Getenv("PIKPAK_USERNAME"); user != "" {
 		if bin, err := exec.LookPath("pikpakcli"); err != nil {

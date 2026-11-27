@@ -35,7 +35,7 @@
   <div id="app" hidden>
     <div class="card">
       <form id="add">
-        <input id="url" type="url" placeholder="下载链接 https://…" required>
+        <input id="url" placeholder="下载链接 https://…" required>
         <input id="dir" placeholder="保存到 (网盘内文件夹，可留空)">
         <button>离线下载</button>
       </form>
@@ -76,7 +76,7 @@ function render(list) {
     const pct = t.state === "done" ? 100 : t.size > 0 ? Math.min(100, t.done / t.size * 100) : 0;
     const bar = el("div", "bar"); const fill = el("i"); fill.style.width = pct + "%"; bar.append(fill); c.append(bar);
     let line = states[t.state] || t.state;
-    if (t.state === "running" && phases[t.phase]) line += " · " + phases[t.phase];
+    if (t.state === "running" && phases[t.phase]) line += " · " + (t.kind === "pikpak" ? "从 PikPak 下载到服务器" : phases[t.phase]);
     line += " · " + size(t.done) + (t.size ? " / " + size(t.size) : "");
     if (t.state === "running" && t.speed) line += " · " + size(t.speed) + "/s";
     c.append(el("div", "meta", line));
@@ -85,7 +85,13 @@ function render(list) {
     box.append(c);
   }
 }
-async function refresh() { try { render((await call("/api/transfers")).transfers); show(true); } catch (e) {} }
+let pikpak;
+async function refresh() {
+  try {
+    render((await call("/api/transfers")).transfers); show(true);
+    if (pikpak === undefined && (pikpak = (await call("/api/status")).pikpak)) $("url").placeholder = "下载链接 https://… 或 pikpak:/网盘路径";
+  } catch (e) {}
+}
 $("loginForm").onsubmit = e => { e.preventDefault(); token = $("token").value.trim(); localStorage.setItem("crypta-token", token); refresh(); };
 $("logout").onclick = () => { token = ""; localStorage.removeItem("crypta-token"); show(false); };
 $("clear").onclick = () => call("/api/transfers/clear", {}).then(refresh);

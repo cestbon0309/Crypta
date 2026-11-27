@@ -30,6 +30,7 @@ const (
 	KindUpload   = "upload"   // local file -> encrypted folder
 	KindDownload = "download" // encrypted folder -> local file
 	KindURL      = "url"      // http(s) link -> local disk -> encrypted folder
+	KindPikPak   = "pikpak"   // PikPak file or folder -> local disk -> one upload per file
 
 	StateQueued   = "queued"
 	StateRunning  = "running"
@@ -89,6 +90,8 @@ type Manager struct {
 	// AllowPrivateURLs lets URL jobs reach loopback, private and link-local
 	// addresses (cloud metadata, services next to the server).
 	AllowPrivateURLs bool
+	// PikPak enables jobs that fetch from a PikPak account.
+	PikPak *PikPak
 }
 
 func publicOnly(network, address string, _ syscall.RawConn) error {
@@ -209,6 +212,8 @@ func (m *Manager) run(ctx context.Context, t *Transfer, fs *FS) {
 		if err = m.fetch(ctx, t); err == nil {
 			err = m.upload(ctx, t, fs)
 		}
+	case KindPikPak:
+		err = m.pull(ctx, t)
 	default:
 		err = fmt.Errorf("unknown kind %q", t.Kind)
 	}
@@ -235,6 +240,10 @@ func (m *Manager) cleanup(t *Transfer) {
 	os.RemoveAll(filepath.Join(m.workDir, t.ID))
 	if t.DeleteSource && t.Kind == KindUpload && t.State == StateDone {
 		os.Remove(m.abs(t.Local))
+		m.prune(m.abs(t.Local))
+	}
+	if t.Kind == KindPikPak && t.State == StateCanceled {
+		os.RemoveAll(m.pikpakDir(t.ID))
 	}
 	if t.Kind == KindDownload && t.State == StateCanceled {
 		os.Remove(m.abs(t.Local) + ".part")
@@ -582,9 +591,24 @@ func newID() string {
 
 // Add queues a transfer. For uploads Remote is the destination folder and
 // the file keeps its name (or Name, if set); for downloads Remote is the
-// file and Local the destination; for URL jobs Remote is the folder.
+// file and Local the destination; for URL jobs Remote is the folder. A URL
+// of the form pikpak:/path fetches that file or folder from PikPak.
 func (m *Manager) Add(t Transfer) (*Transfer, error) {
 	t.ID, t.State, t.CreatedAt, t.Done = newID(), StateQueued, time.Now(), 0
+	if src, ok := strings.CutPrefix(t.URL, "pikpak:"); ok && t.Kind == KindURL {
+		if m.PikPak == nil {
+			return nil, errors.New("PikPak is not set up on this server")
+		}
+		src = path.Clean("/" + strings.TrimSpace(src))
+		if src == "/" {
+			return nil, errors.New("a PikPak path is required, as in pikpak:/folder/file")
+		}
+		t.Kind, t.URL, t.Source, t.Local = KindPikPak, "", src, ""
+		t.Remote = Clean(t.Remote)
+		if t.Name == "" {
+			t.Name = path.Base(src)
+		}
+	}
 	switch t.Kind {
 	case KindUpload:
 		if t.Local == "" {
@@ -612,6 +636,10 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 			t.Local = path.Join("Downloads", t.Name)
 		}
 		t.Local = m.freeLocal(t.Local)
+	case KindPikPak:
+		if t.Source == "" {
+			return nil, errors.New("a PikPak path is required")
+		}
 	case KindURL:
 		u, err := url.Parse(t.URL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {

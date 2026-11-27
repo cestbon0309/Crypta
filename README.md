@@ -18,7 +18,7 @@ docs/                Google 授权、服务器 API（写插件用）
 - 上传照片、视频和任意文件；下载到本机（“文件”App 里的 Crypta 文件夹）
 - 预览图片、文本，视频和音频用 VLCKit 播放（MKV、MP4、RMVB 等），拖动进度条时只取对应的加密块
 - 断点续传：上传用 Drive 的续传会话，下载记录位置；App 被杀或服务器重启后从中断处继续
-- 服务器：直链离线下载、Telegram 机器人收文件，下载完直接加密上传；进度网页；扫码或配对码配对手机
+- 服务器：直链离线下载、从 PikPak 网盘拉取、Telegram 机器人收文件，下载完直接加密上传；进度网页；扫码或配对码配对手机
 
 暂时没有：安卓、“文件”App 扩展、分享扩展、相册自动备份、多账号、BT 下载。
 
@@ -62,7 +62,7 @@ curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubuserconten
 ```
 
 - 默认装到 `~/crypta`；再跑一次就是更新，已有的 `.env` 不会被改。
-- 不想被提问可以提前给变量：`CRYPTA_DOMAIN`、`RCLONE_CONF`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USERS`，再加 `CRYPTA_YES=1`。
+- 不想被提问可以提前给变量：`CRYPTA_DOMAIN`、`RCLONE_CONF`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USERS`、`PIKPAK_USERNAME`、`PIKPAK_PASSWORD`，再加 `CRYPTA_YES=1`。
 - 不填 rclone.conf 时是演示模式。不填域名时没有 HTTPS：演示模式下 App 可以在局域网内配对；接了 Google Drive 时服务只监听本机，要填域名（或自己在前面放 HTTPS 代理）手机才能连。
 
 手动安装：
@@ -77,6 +77,7 @@ docker compose exec core crypta pair          # 显示二维码和配对码
 - 想先不接 Google Drive 试一下：`.env` 里设 `CRYPTA_DEMO=1`，加密文件会存在数据卷里。
 - 进度网页就是服务器地址的首页，令牌用 `docker compose exec core crypta token` 查看。
 - 已有反向代理的话不用 `--profile https`，把代理指到 `127.0.0.1:8080`。
+- PikPak：`.env` 填 `PIKPAK_USERNAME` 和 `PIKPAK_PASSWORD`（密码用单引号括起来）后重启，离线下载的链接一栏就可以填 `pikpak:/网盘路径`，文件或文件夹都行；服务器先把它下载到本机再加密上传，所以磁盘要放得下。
 - Telegram 机器人：`.env` 填 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_ALLOWED_USERS`（给机器人发 `/start` 能看到自己的数字 ID），然后 `docker compose --profile telegram up -d`。官方 Bot API 只能下载 20 MB 以内的文件，更大的文件要自建 Bot API 服务器并填 `TELEGRAM_API_BASE`。
 - 管理设备：`crypta devices`、`crypta revoke <id>`。
 

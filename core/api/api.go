@@ -37,6 +37,8 @@ type Server struct {
 	LocalRoot string
 	// Dashboard serves the progress page at "/".
 	Dashboard bool
+	// PikPak tells clients that pikpak:/path jobs are accepted.
+	PikPak bool
 	// Extra routes (pairing on the server, setup on the phone).
 	Extra func(mux *http.ServeMux, s *Server)
 
@@ -117,7 +119,7 @@ func decode(r *http.Request, v any) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/status", s.Authed(func(w http.ResponseWriter, r *http.Request) {
-		JSON(w, 200, map[string]any{"configured": s.FS() != nil})
+		JSON(w, 200, map[string]any{"configured": s.FS() != nil, "pikpak": s.PikPak})
 	}))
 	mux.HandleFunc("GET /api/list", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		items, err := fs.List(r.Context(), r.URL.Query().Get("path"), r.URL.Query().Get("fresh") == "1")

@@ -198,6 +198,7 @@ func (f *FS) list(ctx context.Context, p string, create, fresh bool) (map[string
 		return nil, nil, err
 	}
 	items = map[string]*Item{}
+	var extra []*Item
 	for _, e := range entries {
 		name, err := f.C.DecryptName(e.Name, e.IsDir)
 		if err != nil || name == "" {
@@ -209,10 +210,37 @@ func (f *FS) list(ctx context.Context, p string, create, fresh bool) (map[string
 				continue
 			}
 		}
-		// Drive allows duplicate names; keep the newest like rclone does.
-		if old := items[name]; old == nil || old.ModTime.Before(it.ModTime) {
+		// Drive allows duplicate names; the newest keeps the name like in
+		// rclone.
+		old := items[name]
+		if old == nil {
 			items[name] = it
+			continue
 		}
+		if old.ModTime.Before(it.ModTime) || old.ModTime.Equal(it.ModTime) && it.id < old.id {
+			items[name], it = it, old
+		}
+		if !it.IsDir {
+			extra = append(extra, it)
+		}
+	}
+	// Other files of the same name (two clients uploading at once) are
+	// shown as "name (2).ext" so that none is hidden.
+	sort.Slice(extra, func(i, j int) bool {
+		a, b := extra[i], extra[j]
+		if !a.ModTime.Equal(b.ModTime) {
+			return a.ModTime.After(b.ModTime)
+		}
+		return a.id < b.id
+	})
+	for _, it := range extra {
+		ext := path.Ext(it.Name)
+		stem := strings.TrimSuffix(it.Name, ext)
+		for i := 2; items[it.Name] != nil; i++ {
+			it.Name = fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		}
+		it.Path = path.Join(p, it.Name)
+		items[it.Name] = it
 	}
 	f.mu.Lock()
 	dc.items, dc.at = items, time.Now()

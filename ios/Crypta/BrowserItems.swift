@@ -297,28 +297,38 @@ struct PathBar: View {
 
     var body: some View {
         let parts = path.split(separator: "/").map(String.init)
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    Button { go(0) } label: { Image(systemName: "house") }
-                        .accessibilityLabel("Crypta")
-                    ForEach(Array(parts.enumerated()), id: \.offset) { i, name in
-                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-                        if i == parts.count - 1 {
-                            Text(name).fontWeight(.medium).foregroundStyle(.primary).id("last")
-                        } else {
-                            Button(name) { go(i + 1) }
-                        }
-                    }
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .buttonStyle(.plain)
-                .padding(.horizontal, 16).padding(.vertical, 8)
-            }
-            .onAppear { proxy.scrollTo("last") }
+        // The whole path if it fits, otherwise its last folders.
+        ViewThatFits(in: .horizontal) {
+            row(parts, from: 0)
+            if parts.count > 2 { row(parts, from: parts.count - 2) }
+            if parts.count > 1 { row(parts, from: parts.count - 1) }
         }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private func row(_ parts: [String], from start: Int) -> some View {
+        HStack(spacing: 6) {
+            Button { go(0) } label: { Image(systemName: "house") }
+                .accessibilityLabel("Crypta")
+            if start > 0 {
+                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                Text("…")
+            }
+            ForEach(Array(parts.enumerated()).dropFirst(start), id: \.offset) { i, name in
+                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                if i == parts.count - 1 {
+                    Text(name).fontWeight(.medium).foregroundStyle(.primary)
+                } else {
+                    Button(name) { go(i + 1) }
+                }
+            }
+        }
+        .lineLimit(1)
     }
 }

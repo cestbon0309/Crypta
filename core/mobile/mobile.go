@@ -41,8 +41,12 @@ type app struct {
 }
 
 var (
-	startMu sync.Mutex
-	started string
+	startMu  sync.Mutex
+	started  string
+	token    string
+	handler  http.Handler
+	listener net.Listener
+	alive    func(addr string) bool
 )
 
 // Start launches the core and returns {"url": "http://127.0.0.1:port",
@@ -62,7 +66,7 @@ func Start(stateDir, filesDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	token := auth.Random(24)
+	token = auth.Random(24)
 	a := &app{stateDir: stateDir}
 	a.srv = &api.Server{Transfers: tm, Auth: func(t string) bool { return api.SameToken(t, token) }, Extra: a.routes}
 	if b, err := os.ReadFile(a.path()); err == nil {
@@ -72,14 +76,69 @@ func Start(stateDir, filesDir string) (string, error) {
 			}
 		}
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+	// Answers with a value only this core knows, which tells it apart
+	// from another program that got hold of its port.
+	inner := a.srv.Handler()
+	id := auth.Random(24)
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/core-id" {
+			io.WriteString(w, id)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	alive = func(addr string) bool {
+		c := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		res, err := c.Get("http://" + addr + "/core-id")
+		if err != nil {
+			return false
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 64))
+		return string(b) == id
+	}
+	if err := listen("127.0.0.1:0"); err != nil {
 		return "", err
 	}
 	go tm.Run(context.Background())
-	go http.Serve(ln, a.srv.Handler())
+	return started, nil
+}
+
+func listen(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	if listener != nil {
+		listener.Close()
+	}
+	listener = ln
+	go http.Serve(ln, handler)
 	out, _ := json.Marshal(map[string]string{"url": "http://" + ln.Addr().String(), "token": token})
 	started = string(out)
+	return nil
+}
+
+// Resume is called when the app returns to the screen. iOS takes the
+// listening socket away from an app it has suspended, so the core listens
+// again if it no longer answers: on the same port if it is still free,
+// else on a new one. It returns the same JSON as Start.
+func Resume() (string, error) {
+	startMu.Lock()
+	defer startMu.Unlock()
+	if listener == nil {
+		return "", errors.New("core is not running")
+	}
+	addr := listener.Addr().String()
+	if alive(addr) {
+		return started, nil
+	}
+	if err := listen(addr); err != nil {
+		if err := listen("127.0.0.1:0"); err != nil {
+			return "", err
+		}
+	}
 	return started, nil
 }
 

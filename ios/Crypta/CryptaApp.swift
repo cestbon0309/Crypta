@@ -14,6 +14,7 @@ struct CryptaApp: App {
                 .onOpenURL { model.handle(url: $0) }
         }
         .onChange(of: phase) { phase in
+            if phase == .active { model.resume() }
             // Ask iOS for a little extra time so short transfers can finish
             // after the app leaves the screen. Longer ones continue from
             // where they stopped the next time the app is opened.

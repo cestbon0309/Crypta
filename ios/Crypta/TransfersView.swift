@@ -108,11 +108,29 @@ struct ServerJobsView: View {
     @EnvironmentObject var model: AppModel
     @State private var jobs: [Transfer] = []
     @State private var link = ""
-    @State private var folder = ""
+    @State private var folder: String
     @State private var error: String?
     @State private var reachable = true
 
+    init(folder: String = "") { _folder = State(initialValue: folder) }
+
     var body: some View {
+        if model.setup.server.isEmpty {
+            List {
+                Section {
+                    NavigationLink { PairView() } label: { Label("与服务器配对", systemImage: "qrcode.viewfinder") }
+                } footer: {
+                    Text("离线下载由服务器完成：先和服务器配对，之后就能在这里添加下载链接。")
+                }
+            }
+            .navigationTitle("离线下载")
+            .navigationBarTitleDisplayMode(.inline)
+        } else {
+            jobList
+        }
+    }
+
+    private var jobList: some View {
         List {
             Section {
                 TextField("下载链接 https://…", text: $link)

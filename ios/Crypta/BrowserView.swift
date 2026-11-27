@@ -19,6 +19,32 @@ struct PickedMedia: Transferable {
     }
 }
 
+/// The system file picker. It hands over copies of the chosen files, so
+/// files in iCloud Drive or another app need no further permission.
+struct DocumentPicker: UIViewControllerRepresentable {
+    let onPick: ([URL]) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        picker.allowsMultipleSelection = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: ([URL]) -> Void
+        init(onPick: @escaping ([URL]) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onPick(urls)
+        }
+    }
+}
+
 struct BrowserView: View {
     @EnvironmentObject var model: AppModel
     let path: String
@@ -39,6 +65,8 @@ struct BrowserView: View {
     @State private var pickingPhotos = false
     @State private var photos: [PhotosPickerItem] = []
     @State private var busy: String?
+    @State private var notice: String?
+    @State private var showingJobs = false
 
     private var title: String { path.isEmpty ? "Crypta" : (path as NSString).lastPathComponent }
     private var shown: [Item] {
@@ -55,6 +83,7 @@ struct BrowserView: View {
                     Menu {
                         Button { pickingPhotos = true } label: { Label("上传照片或视频", systemImage: "photo.on.rectangle") }
                         Button { importingFiles = true } label: { Label("上传文件", systemImage: "doc.badge.plus") }
+                        Button { showingJobs = true } label: { Label("离线下载", systemImage: "icloud.and.arrow.down") }
                         Divider()
                         Button { newName = ""; creatingFolder = true } label: { Label("新建文件夹", systemImage: "folder.badge.plus") }
                     } label: {
@@ -70,14 +99,16 @@ struct BrowserView: View {
             .onChange(of: photos) { picked in
                 guard !picked.isEmpty else { return }
                 photos = []
-                Task { await upload(photos: picked) }
+                Task { await upload(picked.count, from: picked) { try await $0.media() } }
             }
-            .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
-                guard case .success(let urls) = result else { return }
-                Task {
-                    for url in urls { await run { try await model.upload(file: url, to: path) } }
+            .sheet(isPresented: $importingFiles) {
+                DocumentPicker { urls in
+                    importingFiles = false
+                    Task { await upload(urls.count, from: urls) { $0 } }
                 }
+                .ignoresSafeArea()
             }
+            .navigationDestination(isPresented: $showingJobs) { ServerJobsView(folder: path) }
             .alert("新建文件夹", isPresented: $creatingFolder) {
                 TextField("名称", text: $newName)
                 Button("取消", role: .cancel) {}
@@ -112,15 +143,29 @@ struct BrowserView: View {
                 }
             }
             .fullScreenCover(item: $preview) { PreviewView(item: $0) }
-            .overlay(alignment: .bottom) {
-                if let busy {
-                    Label(busy, systemImage: "arrow.up.circle")
-                        .font(.footnote)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.thinMaterial, in: Capsule())
-                        .padding(.bottom, 8)
+            .overlay(alignment: .bottom) { banner }
+            .animation(.default, value: bannerText)
+    }
+
+    private var bannerText: String? { busy ?? notice }
+
+    @ViewBuilder private var banner: some View {
+        if let text = bannerText {
+            HStack(spacing: 8) {
+                if busy != nil {
+                    ProgressView()
+                } else {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 }
+                Text(text)
             }
+            .font(.subheadline)
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(.regularMaterial, in: Capsule())
+            .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+            .padding(.bottom, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 
     @ViewBuilder private var content: some View {
@@ -204,17 +249,43 @@ struct BrowserView: View {
         await load(fresh: true)
     }
 
-    private func upload(photos picked: [PhotosPickerItem]) async {
+    /// Queues picked items for upload, saying so as soon as they are picked
+    /// and again once the upload jobs exist.
+    private func upload<T>(_ count: Int, from picked: [T], file: (T) async throws -> URL) async {
+        var queued = 0
+        var failure: String?
         for (i, p) in picked.enumerated() {
-            busy = "正在准备 \(i + 1)/\(picked.count)…"
-            await run {
-                guard let media = try await p.loadTransferable(type: PickedMedia.self) else {
-                    throw APIError(message: "无法读取所选的项目")
-                }
-                try await model.upload(file: media.url, to: path, move: true)
+            busy = "正在准备上传 \(i + 1)/\(count)…"
+            do {
+                try await model.upload(file: try await file(p), to: path, move: true)
+                queued += 1
+            } catch {
+                failure = error.localizedDescription
             }
         }
         busy = nil
+        if queued > 0 {
+            let text = "已添加 \(queued) 个上传任务，可在“传输”查看进度"
+            notice = text
+            Task {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if notice == text { notice = nil }
+            }
+        }
+        if let failure {
+            // An alert shown while the picker is still closing is dropped.
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            actionError = failure
+        }
+    }
+}
+
+private extension PhotosPickerItem {
+    func media() async throws -> URL {
+        guard let media = try await loadTransferable(type: PickedMedia.self) else {
+            throw APIError(message: "无法读取所选的项目")
+        }
+        return media.url
     }
 }
 

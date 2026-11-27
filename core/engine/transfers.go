@@ -38,9 +38,11 @@ const (
 	StateDone     = "done"
 	StateFailed   = "failed"
 	StateCanceled = "canceled"
-
-	uploadChunk = 8 * 1024 * 1024 // multiple of remote.ChunkAlign
 )
+
+// uploadChunk is how many bytes one request sends to the remote, a multiple
+// of remote.ChunkAlign. Each running upload holds one chunk in memory.
+var uploadChunk int64 = 128 * 1024 * 1024
 
 // Transfer is one job. It is persisted after every chunk so that a killed
 // process continues where it stopped.
@@ -368,15 +370,26 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 	m.update(t, func() { t.Phase = "uploading" })
 	var nonce crypt.Nonce
 	copy(nonce[:], t.Nonce)
-	buf := make([]byte, uploadChunk)
+	buf := make([]byte, min(uploadChunk, total))
 	pr := &progress{m: m, t: t}
+	// Plain bytes covered by the first enc encrypted ones.
+	plainAt := func(enc int64) int64 {
+		enc -= crypt.HeaderSize
+		if enc <= 0 {
+			return 0
+		}
+		blocks, rem := enc/crypt.BlockSize, enc%crypt.BlockSize
+		return blocks*crypt.BlockData + max(0, rem-crypt.BlockOverhead)
+	}
 	retries := 0
 	for {
 		n, err := fs.C.EncryptAt(src, size, nonce, offset, buf)
 		if err != nil && err != io.EOF {
 			return err
 		}
-		done, err := fs.R.UploadChunk(ctx, t.Session, offset, buf[:n], total)
+		at := offset
+		done, err := fs.R.UploadChunk(remote.WithSent(ctx, func(sent int64) { pr.set(plainAt(at+sent), false) }),
+			t.Session, offset, buf[:n], total)
 		if err != nil {
 			if errors.Is(err, remote.ErrSessionGone) {
 				m.update(t, func() { t.Session = "" })
@@ -403,11 +416,7 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 		}
 		retries = 0
 		offset += int64(n)
-		plain := offset - crypt.HeaderSize - (offset-crypt.HeaderSize+crypt.BlockSize-1)/crypt.BlockSize*crypt.BlockOverhead
-		if plain < 0 {
-			plain = 0
-		}
-		pr.set(plain, true)
+		pr.set(plainAt(offset), true)
 		if done {
 			break
 		}

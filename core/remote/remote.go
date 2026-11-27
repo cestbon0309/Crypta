@@ -44,3 +44,35 @@ type Remote interface {
 }
 
 const ChunkAlign = 256 * 1024
+
+type sentKey struct{}
+
+// WithSent makes UploadChunk report, while a chunk is on its way, how many
+// of its bytes have been sent so far. A resent chunk starts again from 0.
+func WithSent(ctx context.Context, fn func(sent int64)) context.Context {
+	return context.WithValue(ctx, sentKey{}, fn)
+}
+
+type sentReader struct {
+	r  io.Reader
+	n  int64
+	fn func(int64)
+}
+
+func (s *sentReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.n += int64(n)
+		s.fn(s.n)
+	}
+	return n, err
+}
+
+// sent wraps a request body so that it reports to the function of WithSent.
+func sent(ctx context.Context, r io.Reader) io.Reader {
+	fn, _ := ctx.Value(sentKey{}).(func(int64))
+	if fn == nil {
+		return r
+	}
+	return &sentReader{r: r, fn: fn}
+}

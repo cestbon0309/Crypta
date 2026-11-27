@@ -43,6 +43,9 @@ func TestDriveResume(t *testing.T) {
 	dir := t.TempDir()
 	files := filepath.Join(dir, "files")
 	os.MkdirAll(files, 0o755)
+	// Small chunks, so that the file takes several.
+	defer func(n int64) { uploadChunk = n }(uploadChunk)
+	uploadChunk = 8 * 1024 * 1024
 	data := randBytes(30*1024*1024 + 999)
 	os.WriteFile(filepath.Join(files, "movie.mkv"), data, 0o644)
 

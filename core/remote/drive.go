@@ -101,6 +101,13 @@ func (d *Drive) do(ctx context.Context, method, u string, hdr http.Header, body 
 		if err != nil {
 			return nil, err
 		}
+		if len(body) > 0 {
+			// Wrapped after NewRequest, which has set the length from the bytes.
+			req.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(sent(ctx, bytes.NewReader(body))), nil
+			}
+			req.Body, _ = req.GetBody()
+		}
 		for k, v := range hdr {
 			req.Header[k] = v
 		}

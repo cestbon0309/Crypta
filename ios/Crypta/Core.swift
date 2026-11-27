@@ -243,6 +243,8 @@ final class AppModel: ObservableObject {
     func configure(_ path: String, _ body: [String: Any] = [:]) async throws {
         guard let api else { return }
         setup = try await api.post(path, body, timeout: 90)
+        // Previews belong to the storage that was just replaced.
+        await ThumbnailStore.shared.clear()
         transfers = []
         await pollTransfers()
     }

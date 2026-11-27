@@ -130,13 +130,18 @@ func TestDriveResume(t *testing.T) {
 		t.Fatal("download differs")
 	}
 
-	// Overwrite, rename, delete on Drive.
+	// A second upload of the name is kept beside the first; rename, delete on Drive.
 	os.WriteFile(filepath.Join(files, "movie.mkv"), []byte("v2"), 0o644)
 	tr2, _ := m.Add(Transfer{Kind: KindUpload, Local: "movie.mkv", Remote: "videos"})
-	waitState(t, m, tr2.ID, StateDone)
+	if s := waitState(t, m, tr2.ID, StateDone); s.Name != "movie (2).mkv" {
+		t.Fatalf("second upload is named %q", s.Name)
+	}
 	items, _ := fs.List(ctx, "videos", true)
-	if len(items) != 1 || items[0].Size != 2 {
-		t.Fatalf("overwrite: %+v", items)
+	if len(items) != 2 {
+		t.Fatalf("same name: %+v", items)
+	}
+	if err := fs.Delete(ctx, "videos/movie (2).mkv"); err != nil {
+		t.Fatal(err)
 	}
 	if err := fs.Move(ctx, "videos/movie.mkv", "other/m.mkv"); err != nil {
 		t.Fatal(err)

@@ -232,13 +232,12 @@ struct SettingsView: View {
                     NavigationLink { PairView() } label: { Label("与服务器配对", systemImage: "qrcode.viewfinder") }
                 } else {
                     LabeledContent("地址", value: model.setup.server)
-                    NavigationLink { ServerJobsView() } label: { Label("离线下载", systemImage: "icloud.and.arrow.down") }
                     Button("取消配对", role: .destructive) { confirmUnpair = true }
                 }
             } header: {
                 Text("服务器")
             } footer: {
-                Text("服务器是可选的：它负责离线下载，下载完成后加密上传到 Google Drive。")
+                Text("服务器是可选的：它负责离线下载，下载完成后加密上传到 Google Drive。离线下载在“文件”页右上角的 + 里。")
             }
             Section {
                 Button("退出并清除本机配置", role: .destructive) { confirmReset = true }

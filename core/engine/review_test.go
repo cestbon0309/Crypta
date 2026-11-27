@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -87,23 +88,42 @@ func TestConcurrentFolderCreation(t *testing.T) {
 	}
 }
 
-// Overwriting a file keeps its Drive id and time but changes the nonce.
-func TestPreviewAfterOverwrite(t *testing.T) {
+// Uploads of one name, whether one after the other or at the same time,
+// each keep their own file.
+func TestUploadNamesDoNotCollide(t *testing.T) {
 	m, fs, files := driveRig(t)
-	p := filepath.Join(files, "a.txt")
-	for _, content := range []string{"first version", "other content"} {
-		os.WriteFile(p, []byte(content), 0o644)
-		os.Chtimes(p, fixedTime, fixedTime)
-		tr, err := m.Add(Transfer{Kind: KindUpload, Local: "a.txt", Remote: ""})
+	want := map[string]bool{"a.txt": true, "a (2).txt": true, "a (3).txt": true, "a (4).txt": true}
+	add := func(i int) string {
+		local := fmt.Sprintf("up%d/a.txt", i)
+		os.MkdirAll(filepath.Join(files, filepath.Dir(local)), 0o755)
+		os.WriteFile(filepath.Join(files, local), []byte(fmt.Sprint("content ", i)), 0o644)
+		tr, err := m.Add(Transfer{Kind: KindUpload, Local: local, Remote: ""})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s := waitState(t, m, tr.ID, StateDone, StateFailed); s.State != StateDone {
+		return tr.ID
+	}
+	first := add(0)
+	if s := waitState(t, m, first, StateDone, StateFailed); s.State != StateDone {
+		t.Fatal(s.Error)
+	}
+	ids := []string{first, add(1), add(2), add(3)}
+	for i, id := range ids {
+		s := waitState(t, m, id, StateDone, StateFailed)
+		if s.State != StateDone {
 			t.Fatal(s.Error)
 		}
-		if got := read(t, fs, "a.txt"); string(got) != content {
-			t.Fatalf("got %q, want %q", got, content)
+		if got := read(t, fs, s.Remote); string(got) != fmt.Sprint("content ", i) {
+			t.Fatalf("%s holds %q", s.Remote, got)
 		}
+		if !want[s.Name] {
+			t.Fatalf("unexpected or repeated name %q", s.Name)
+		}
+		delete(want, s.Name)
+	}
+	items, err := fs.List(context.Background(), "", true)
+	if err != nil || len(items) != 4 {
+		t.Fatalf("listing: %v %+v", err, items)
 	}
 }
 

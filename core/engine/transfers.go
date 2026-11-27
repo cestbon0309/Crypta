@@ -73,7 +73,9 @@ type Transfer struct {
 }
 
 type Manager struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// naming serializes picking the remote name of a new upload.
+	naming    sync.Mutex
 	fs        *FS
 	stateFile string
 	filesDir  string
@@ -326,23 +328,30 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 		if err != nil {
 			return err
 		}
+		// An upload never overwrites: a name that is taken, by a file or
+		// by an upload still under way, becomes "name (2).ext".
+		m.naming.Lock()
 		parent, name := split(Clean(t.Remote))
 		items, dc, err := fs.list(ctx, parent, true, true)
 		if err != nil {
+			m.naming.Unlock()
 			return err
 		}
-		replace := ""
-		if old := items[name]; old != nil {
-			if old.IsDir {
-				return fmt.Errorf("%s is a folder", t.Remote)
-			}
-			replace = old.id
+		ext := path.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
+		for i := 2; items[name] != nil || m.uploading(path.Join(parent, name), t.ID); i++ {
+			name = fmt.Sprintf("%s (%d)%s", stem, i, ext)
 		}
-		session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), replace, total, fi.ModTime())
+		session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), "", total, fi.ModTime())
 		if err != nil {
+			m.naming.Unlock()
 			return err
 		}
-		m.update(t, func() { t.Nonce, t.Session, t.SrcMod, t.Size, t.Done = nonce[:], session, fi.ModTime(), size, 0 })
+		m.update(t, func() {
+			t.Remote, t.Name = path.Join(parent, name), name
+			t.Nonce, t.Session, t.SrcMod, t.Size, t.Done = nonce[:], session, fi.ModTime(), size, 0
+		})
+		m.naming.Unlock()
 	}
 	m.update(t, func() { t.Phase = "uploading" })
 	var nonce crypt.Nonce
@@ -616,6 +625,20 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 	m.mu.Unlock()
 	m.kick()
 	return &cp, nil
+}
+
+// uploading reports whether an unfinished upload other than id has already
+// started writing to remote path p.
+func (m *Manager) uploading(p, id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.items {
+		if t.ID != id && t.Kind != KindDownload && t.Session != "" && t.Remote == p &&
+			t.State != StateDone && t.State != StateCanceled {
+			return true
+		}
+	}
+	return false
 }
 
 // freeLocal returns p, or "name (2).ext" and so on when p is taken by a

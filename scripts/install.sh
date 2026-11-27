@@ -98,8 +98,11 @@ val() { sed -n "s/^$1=//p" .env | tail -1; }
 
 # A domain is often typed as an address: https://example.com/ means example.com.
 domain_of() {
-	local d=${1//[[:space:]]/}
-	d=${d#*://}
+	local d
+	read -r d _ <<<"$1" || true
+	if [[ $d =~ ^[A-Za-z][A-Za-z0-9+.-]*://(.*)$ ]]; then
+		d=${BASH_REMATCH[1]}
+	fi
 	printf '%s' "${d%%/*}"
 }
 

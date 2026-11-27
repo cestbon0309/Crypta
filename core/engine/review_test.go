@@ -221,3 +221,28 @@ func TestDuplicateNamesAreListed(t *testing.T) {
 		t.Fatalf("after rename and delete: %s", got)
 	}
 }
+
+// A name that a paused upload is writing to cannot be taken by a move or a
+// new folder in the meantime.
+func TestUploadNameIsHeld(t *testing.T) {
+	m, fs, files := driveRig(t)
+	ctx := context.Background()
+	os.WriteFile(filepath.Join(files, "other.txt"), []byte("other"), 0o644)
+	tr, _ := m.Add(Transfer{Kind: KindUpload, Local: "other.txt", Remote: ""})
+	waitState(t, m, tr.ID, StateDone)
+	m.mu.Lock()
+	m.items["held"] = &Transfer{ID: "held", Kind: KindUpload, State: StatePaused, Session: "s", Remote: "a (2).txt", Name: "a (2).txt"}
+	m.mu.Unlock()
+	if err := m.Move(ctx, fs, "other.txt", "a (2).txt"); err == nil {
+		t.Fatal("moved onto a name an upload holds")
+	}
+	if err := m.Mkdir(ctx, fs, "a (2).txt"); err == nil {
+		t.Fatal("made a folder on a name an upload holds")
+	}
+	if err := m.Move(ctx, fs, "other.txt", "b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Mkdir(ctx, fs, "dir"); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -133,7 +133,7 @@ func (s *Server) Handler() http.Handler {
 			Fail(w, errors.New("path required"))
 			return
 		}
-		s.done(w, fs.Mkdir(r.Context(), in.Path))
+		s.done(w, s.Transfers.Mkdir(r.Context(), fs, in.Path))
 	}))
 	mux.HandleFunc("POST /api/move", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		var in struct{ From, To string }
@@ -141,7 +141,7 @@ func (s *Server) Handler() http.Handler {
 			Fail(w, err)
 			return
 		}
-		s.done(w, fs.Move(r.Context(), in.From, in.To))
+		s.done(w, s.Transfers.Move(r.Context(), fs, in.From, in.To))
 	}))
 	mux.HandleFunc("POST /api/delete", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		var in struct{ Path string }

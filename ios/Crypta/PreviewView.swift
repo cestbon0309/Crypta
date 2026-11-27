@@ -187,6 +187,9 @@ final class Player: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     @Published var elapsed = "00:00"
     @Published var total = "--:--"
     var scrubbing = false
+    // VLC does not seek reliably while paused, so a seek made then is kept
+    // here and applied when playback resumes.
+    private var pending: Double?
 
     func open(_ url: URL) {
         let media = VLCMedia(url: url)
@@ -198,7 +201,17 @@ final class Player: NSObject, ObservableObject, VLCMediaPlayerDelegate {
 
     func toggle() { vlc.isPlaying ? vlc.pause() : vlc.play() }
     func skip(_ seconds: Int32) { seconds > 0 ? vlc.jumpForward(seconds) : vlc.jumpBackward(-seconds) }
-    func seek(to p: Double) { vlc.position = Float(p) }
+    func seek(to p: Double) {
+        if vlc.isPlaying {
+            vlc.position = Float(p)
+            return
+        }
+        pending = p
+        position = p
+        if let length = vlc.media?.length, length.intValue > 0 {
+            elapsed = VLCTime(int: Int32(Double(length.intValue) * p)).stringValue
+        }
+    }
     func stop() { vlc.delegate = nil; vlc.stop() }
 
     func mediaPlayerStateChanged(_ notification: Notification) {
@@ -216,6 +229,12 @@ final class Player: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         DispatchQueue.main.async { [self] in
             buffering = false
             playing = vlc.isPlaying
+            if let p = pending {
+                guard vlc.isPlaying else { return }
+                pending = nil
+                vlc.position = Float(p)
+                return
+            }
             if !scrubbing { position = Double(vlc.position) }
             elapsed = vlc.time.stringValue
             if let length = vlc.media?.length, length.intValue > 0 { total = length.stringValue }

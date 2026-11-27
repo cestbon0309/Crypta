@@ -168,3 +168,56 @@ func TestURLJobs(t *testing.T) {
 		t.Fatalf("resumed download mixed two versions (%d bytes, starts %q)", len(got), got[:8])
 	}
 }
+
+// Two clients that upload one name at the same moment leave Drive with two
+// files of that name; both are listed and can be told apart.
+func TestDuplicateNamesAreListed(t *testing.T) {
+	_, fs, _ := driveRig(t)
+	ctx := context.Background()
+	if err := fs.Mkdir(ctx, "d"); err != nil {
+		t.Fatal(err)
+	}
+	dc, err := fs.dir(ctx, "d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := fs.C.EncryptName("a.jpg", false)
+	for i := 0; i < 3; i++ {
+		data := make([]byte, crypt.EncryptedSize(int64(5+i)))
+		session, err := fs.R.StartUpload(ctx, dc.id, enc, "", int64(len(data)), fixedTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done, err := fs.R.UploadChunk(ctx, session, 0, data, int64(len(data))); err != nil || !done {
+			t.Fatal(done, err)
+		}
+	}
+	names := func() string {
+		items, err := fs.List(ctx, "d", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, it := range items {
+			out = append(out, fmt.Sprint(it.Name, ":", it.Size))
+		}
+		return strings.Join(out, " ")
+	}
+	first := names()
+	if strings.Count(first, "a.jpg:")+strings.Count(first, "a (2).jpg:")+strings.Count(first, "a (3).jpg:") != 3 {
+		t.Fatalf("listing: %s", first)
+	}
+	if again := names(); again != first {
+		t.Fatalf("listing changed: %s then %s", first, again)
+	}
+	// Renaming a shown duplicate gives it that name on Drive.
+	if err := fs.Move(ctx, "d/a (3).jpg", "d/b.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Delete(ctx, "d/a (2).jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(); strings.Count(got, ":") != 2 || !strings.Contains(got, "a.jpg:") || !strings.Contains(got, "b.jpg:") {
+		t.Fatalf("after rename and delete: %s", got)
+	}
+}

@@ -46,6 +46,7 @@ var (
 	token    string
 	handler  http.Handler
 	listener net.Listener
+	alive    func(addr string) bool
 )
 
 // Start launches the core and returns {"url": "http://127.0.0.1:port",
@@ -75,7 +76,27 @@ func Start(stateDir, filesDir string) (string, error) {
 			}
 		}
 	}
-	handler = a.srv.Handler()
+	// Answers with a value only this core knows, which tells it apart
+	// from another program that got hold of its port.
+	inner := a.srv.Handler()
+	id := auth.Random(24)
+	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/core-id" {
+			io.WriteString(w, id)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	alive = func(addr string) bool {
+		c := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+		res, err := c.Get("http://" + addr + "/core-id")
+		if err != nil {
+			return false
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(io.LimitReader(res.Body, 64))
+		return string(b) == id
+	}
 	if err := listen("127.0.0.1:0"); err != nil {
 		return "", err
 	}
@@ -109,8 +130,7 @@ func Resume() (string, error) {
 		return "", errors.New("core is not running")
 	}
 	addr := listener.Addr().String()
-	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
-		c.Close()
+	if alive(addr) {
 		return started, nil
 	}
 	if err := listen(addr); err != nil {

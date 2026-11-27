@@ -2,6 +2,7 @@ package mobile
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"testing"
 )
@@ -35,5 +36,18 @@ func TestResume(t *testing.T) {
 	again, err := Resume()
 	if err != nil || again != out || get(again) != 200 {
 		t.Fatal(again, err, get(again))
+	}
+	// Another program on the core's port is not taken for the core.
+	addr := listener.Addr().String()
+	listener.Close()
+	other, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skip(err)
+	}
+	defer other.Close()
+	go http.Serve(other, http.NotFoundHandler())
+	moved, err := Resume()
+	if err != nil || moved == out || get(moved) != 200 {
+		t.Fatal(moved, err, get(moved))
 	}
 }

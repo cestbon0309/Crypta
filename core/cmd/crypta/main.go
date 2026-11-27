@@ -92,11 +92,9 @@ func serve() error {
 		return err
 	}
 	if user := os.Getenv("PIKPAK_USERNAME"); user != "" {
-		bin, err := exec.LookPath("pikpakcli")
-		if err != nil {
-			return fmt.Errorf("PIKPAK_USERNAME is set but pikpakcli is not installed: %w", err)
-		}
-		if tm.PikPak, err = engine.NewPikPak(bin, filepath.Join(stateDir, "pikpak"), user, os.Getenv("PIKPAK_PASSWORD"), os.Getenv("PIKPAK_PROXY")); err != nil {
+		if bin, err := exec.LookPath("pikpakcli"); err != nil {
+			fmt.Fprintln(os.Stderr, "crypta: PIKPAK_USERNAME is set but pikpakcli is not installed; PikPak downloads are off")
+		} else if tm.PikPak, err = engine.NewPikPak(bin, filepath.Join(stateDir, "pikpak"), user, os.Getenv("PIKPAK_PASSWORD"), os.Getenv("PIKPAK_PROXY")); err != nil {
 			return err
 		}
 	}

@@ -1,0 +1,53 @@
+# Crypta server: the core (Go) plus optional pieces.
+#
+#   docker compose up -d                         core only
+#   docker compose --profile telegram up -d      + Telegram bot
+#   docker compose --profile https up -d         + Caddy with automatic HTTPS
+#
+# Settings come from .env (copy .env.example).
+services:
+  core:
+    build: ./core
+    restart: unless-stopped
+    environment:
+      CRYPTA_PUBLIC_URL: ${CRYPTA_PUBLIC_URL:-}
+      CRYPTA_REMOTE: ${CRYPTA_REMOTE:-}
+      CRYPTA_DEMO: ${CRYPTA_DEMO:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ${RCLONE_CONF:-./rclone.conf}:/config/rclone.conf:ro
+      - crypta-data:/data
+      - crypta-downloads:/downloads
+    ports:
+      - "${CRYPTA_BIND:-127.0.0.1:8080}:8080"
+
+  telegram:
+    profiles: ["telegram"]
+    build: ./plugins/telegram
+    restart: unless-stopped
+    depends_on: [core]
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS:-}
+      TELEGRAM_REMOTE_DIR: ${TELEGRAM_REMOTE_DIR:-Telegram}
+      TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-}
+    volumes:
+      - crypta-data:/data:ro
+      - crypta-downloads:/downloads
+
+  caddy:
+    profiles: ["https"]
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [core]
+    command: caddy reverse-proxy --from ${CRYPTA_DOMAIN:-localhost} --to core:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+
+volumes:
+  crypta-data:
+  crypta-downloads:
+  caddy-data:

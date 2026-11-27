@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypta</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1c1c1e; --muted:#8e8e93; --bg:#f2f2f7; --card:#fff; --line:#e5e5ea; --accent:#0a84ff; --bad:#ff453a; --ok:#30d158; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#f2f2f7; --bg:#000; --card:#1c1c1e; --line:#2c2c2e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 -apple-system, system-ui, "PingFang SC", sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width:760px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:26px; margin:8px 0 16px; }
+  .card { background:var(--card); border-radius:12px; padding:14px; margin-bottom:12px; }
+  form { display:flex; gap:8px; flex-wrap:wrap; }
+  input { flex:1 1 200px; min-width:0; padding:9px 11px; border:1px solid var(--line); border-radius:9px; background:transparent; color:inherit; font:inherit; }
+  button { padding:9px 14px; border:0; border-radius:9px; background:var(--accent); color:#fff; font:inherit; cursor:pointer; }
+  button.plain { background:transparent; color:var(--accent); padding:4px 8px; }
+  .row { display:flex; justify-content:space-between; gap:12px; align-items:baseline; }
+  .name { font-weight:600; overflow-wrap:anywhere; }
+  .meta { color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
+  .bar { height:6px; border-radius:3px; background:var(--line); margin:9px 0 6px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  .failed .bar i { background:var(--bad); } .done .bar i { background:var(--ok); }
+  .err { color:var(--bad); font-size:13px; }
+  .empty { color:var(--muted); text-align:center; padding:30px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Crypta</h1>
+  <div class="card" id="login" hidden>
+    <form id="loginForm"><input id="token" type="password" placeholder="访问令牌 (CRYPTA_ADMIN_TOKEN)" autocomplete="current-password"><button>进入</button></form>
+  </div>
+  <div id="app" hidden>
+    <div class="card">
+      <form id="add">
+        <input id="url" type="url" placeholder="下载链接 https://…" required>
+        <input id="dir" placeholder="保存到 (网盘内文件夹，可留空)">
+        <button>离线下载</button>
+      </form>
+      <div class="err" id="addErr"></div>
+    </div>
+    <div class="row" style="margin:18px 4px 8px"><b>任务</b><span><button class="plain" id="clear">清除已完成</button><button class="plain" id="logout">退出</button></span></div>
+    <div id="list"></div>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let token = localStorage.getItem("crypta-token") || "";
+const size = n => { const u = ["B","KB","MB","GB","TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return n.toFixed(i ? 1 : 0) + " " + u[i]; };
+const states = { queued:"排队中", running:"进行中", paused:"已暂停", done:"已完成", failed:"失败", canceled:"已取消" };
+const phases = { downloading:"下载到服务器", uploading:"加密上传到 Google Drive" };
+async function call(path, body) {
+  const r = await fetch(path, { method: body === undefined ? "GET" : "POST", headers: { Authorization: "Bearer " + token }, body: body === undefined ? undefined : JSON.stringify(body) });
+  if (r.status === 401) { show(false); throw new Error("unauthorized"); }
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function show(ok) { $("login").hidden = ok; $("app").hidden = !ok; }
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function render(list) {
+  const box = $("list"); box.replaceChildren();
+  if (!list.length) { box.append(el("div", "empty", "还没有任务")); return; }
+  for (const t of list) {
+    const c = el("div", "card " + t.state);
+    const top = el("div", "row"); top.append(el("span", "name", t.name || t.url || t.remote));
+    const acts = el("span");
+    const act = (label, a) => { const b = el("button", "plain", label); b.onclick = () => call(`/api/transfers/${t.id}/${a}`, {}).then(refresh); acts.append(b); };
+    if (t.state === "running" || t.state === "queued") act("暂停", "pause");
+    if (t.state === "paused") act("继续", "resume");
+    if (t.state === "failed") act("重试", "resume");
+    act(t.state === "done" || t.state === "canceled" ? "移除" : "取消", "remove");
+    top.append(acts); c.append(top);
+    const pct = t.state === "done" ? 100 : t.size > 0 ? Math.min(100, t.done / t.size * 100) : 0;
+    const bar = el("div", "bar"); const fill = el("i"); fill.style.width = pct + "%"; bar.append(fill); c.append(bar);
+    let line = states[t.state] || t.state;
+    if (t.state === "running" && phases[t.phase]) line += " · " + phases[t.phase];
+    line += " · " + size(t.done) + (t.size ? " / " + size(t.size) : "");
+    if (t.state === "running" && t.speed) line += " · " + size(t.speed) + "/s";
+    c.append(el("div", "meta", line));
+    c.append(el("div", "meta", "→ /" + t.remote));
+    if (t.error) c.append(el("div", "err", t.error));
+    box.append(c);
+  }
+}
+async function refresh() { try { render((await call("/api/transfers")).transfers); show(true); } catch (e) {} }
+$("loginForm").onsubmit = e => { e.preventDefault(); token = $("token").value.trim(); localStorage.setItem("crypta-token", token); refresh(); };
+$("logout").onclick = () => { token = ""; localStorage.removeItem("crypta-token"); show(false); };
+$("clear").onclick = () => call("/api/transfers/clear", {}).then(refresh);
+$("add").onsubmit = async e => {
+  e.preventDefault(); $("addErr").textContent = "";
+  try { await call("/api/transfers", { kind: "url", url: $("url").value, remote: $("dir").value }); $("url").value = ""; refresh(); }
+  catch (err) { $("addErr").textContent = err.message; }
+};
+if (location.hash.startsWith("#token=")) { token = decodeURIComponent(location.hash.slice(7)); localStorage.setItem("crypta-token", token); history.replaceState(null, "", location.pathname); }
+if (token) refresh(); else show(false);
+setInterval(() => { if (token && !document.hidden) refresh(); }, 2000);
+</script>
+</body>
+</html>

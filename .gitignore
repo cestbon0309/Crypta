@@ -1,0 +1,10 @@
+.DS_Store
+.env
+rclone.conf
+/ios/Frameworks/
+/ios/Crypta.xcodeproj/
+/ios/build/
+/build/
+*.ipa
+__pycache__/
+xcuserdata/

@@ -332,6 +332,9 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 		// by an upload still under way, becomes "name (2).ext".
 		m.naming.Lock()
 		parent, name := split(Clean(t.Remote))
+		// Taken before listing: an upload that finishes in between is
+		// then in one of the two.
+		busy := m.uploading(t.ID)
 		items, dc, err := fs.list(ctx, parent, true, true)
 		if err != nil {
 			m.naming.Unlock()
@@ -339,7 +342,7 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 		}
 		ext := path.Ext(name)
 		stem := strings.TrimSuffix(name, ext)
-		for i := 2; items[name] != nil || m.uploading(path.Join(parent, name), t.ID); i++ {
+		for i := 2; items[name] != nil || busy[path.Join(parent, name)]; i++ {
 			name = fmt.Sprintf("%s (%d)%s", stem, i, ext)
 		}
 		session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), "", total, fi.ModTime())
@@ -627,18 +630,19 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 	return &cp, nil
 }
 
-// uploading reports whether an unfinished upload other than id has already
-// started writing to remote path p.
-func (m *Manager) uploading(p, id string) bool {
+// uploading returns the remote paths that unfinished uploads other than
+// id have already started writing to.
+func (m *Manager) uploading(id string) map[string]bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	busy := map[string]bool{}
 	for _, t := range m.items {
-		if t.ID != id && t.Kind != KindDownload && t.Session != "" && t.Remote == p &&
+		if t.ID != id && t.Kind != KindDownload && t.Session != "" &&
 			t.State != StateDone && t.State != StateCanceled {
-			return true
+			busy[t.Remote] = true
 		}
 	}
-	return false
+	return busy
 }
 
 // freeLocal returns p, or "name (2).ext" and so on when p is taken by a

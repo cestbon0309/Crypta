@@ -75,13 +75,17 @@ func split(p string) (dir, name string) {
 	return strings.TrimSuffix(dir, "/"), name
 }
 
+// find returns the newest entry with that name, the one listings show
+// when Drive holds duplicates.
 func find(entries []remote.Entry, name string, dir bool) *remote.Entry {
+	var best *remote.Entry
 	for i := range entries {
-		if entries[i].Name == name && entries[i].IsDir == dir {
-			return &entries[i]
+		e := &entries[i]
+		if e.Name == name && e.IsDir == dir && (best == nil || best.ModTime.Before(e.ModTime)) {
+			best = e
 		}
 	}
-	return nil
+	return best
 }
 
 // rootID resolves (and optionally creates) the unencrypted base path.

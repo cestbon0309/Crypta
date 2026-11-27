@@ -56,20 +56,29 @@ $DOCKER info >/dev/null 2>&1 || die "Docker is installed but not running"
 $DOCKER compose version >/dev/null 2>&1 || die "the Docker Compose plugin is missing (package docker-compose-plugin)"
 
 say "Fetching Crypta into $DIR"
-# The token reaches git through its environment, so it is neither written
-# to .git/config nor visible in the process list.
+# The token is handed to git by a helper that reads it from the environment,
+# so it is neither written to .git/config nor visible in the process list.
 git_auth() {
-	if [ -n "${GITHUB_TOKEN:-}" ]; then
-		GIT_CONFIG_COUNT=1 \
-			GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
-			GIT_CONFIG_VALUE_0="Authorization: Basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')" \
-			git "$@"
-	else
+	if [ -z "${GITHUB_TOKEN:-}" ]; then
 		git "$@"
+		return
 	fi
+	local helper rc=0
+	helper=$(mktemp)
+	cat >"$helper" <<'ASKPASS'
+#!/bin/sh
+case "$1" in
+Username*) echo x-access-token ;;
+*) echo "$GITHUB_TOKEN" ;;
+esac
+ASKPASS
+	chmod 700 "$helper"
+	GITHUB_TOKEN=$GITHUB_TOKEN GIT_ASKPASS=$helper GIT_TERMINAL_PROMPT=0 git "$@" || rc=$?
+	rm -f "$helper"
+	return $rc
 }
 if [ -d "$DIR/.git" ]; then
-	git_auth -C "$DIR" fetch --depth 1 origin "$REF"
+	git_auth -C "$DIR" fetch origin "$REF"
 	git -C "$DIR" merge -q --ff-only FETCH_HEAD ||
 		die "$DIR has changes of its own; update it by hand with git"
 else
@@ -160,11 +169,16 @@ if [ -z "$(val CRYPTA_DOMAIN)" ]; then
 	if [ -n "$(val CRYPTA_DEMO)" ]; then
 		echo "No domain set: the app only pairs over plain http on the local network."
 	else
-		echo "No domain set: the server only listens on this machine. Set CRYPTA_DOMAIN and CRYPTA_PUBLIC_URL in $DIR/.env (or put your own HTTPS proxy in front) and run this again so the phone can reach it."
+		echo "No domain set: the server only listens on this machine. So the phone can reach it, edit $DIR/.env and run this again: set CRYPTA_DOMAIN and CRYPTA_PUBLIC_URL=https://<domain> for automatic HTTPS, or with your own HTTPS proxy set only CRYPTA_PUBLIC_URL to its address."
 	fi
 fi
-echo
-compose exec -T core crypta pair
+case $(val CRYPTA_PUBLIC_URL) in
+http://127.0.0.1:*) ;;
+*)
+	echo
+	compose exec -T core crypta pair
+	;;
+esac
 cat <<DONE
 
 New pairing code:  cd $DIR && $DOCKER compose exec core crypta pair

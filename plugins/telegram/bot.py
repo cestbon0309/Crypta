@@ -180,7 +180,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         await status.show(f"❌ {name} 失败：{e}", final=True)
         return
-    target_dir = DOWNLOADS / "telegram" / str(msg.message_id)
+    target_dir = DOWNLOADS / "telegram" / job["id"]  # message ids repeat across chats
     target = target_dir / name
     seen = {"phase": "从 Telegram 下载", "have": False, "canceled": False}
     receiving += 1
@@ -209,8 +209,8 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         size, seen["have"], seen["phase"] = tg_file.file_size or size, True, "转存到上传目录"
         target_dir.mkdir(parents=True, exist_ok=True)
         if LOCAL_MODE and tg_file.file_path and Path(tg_file.file_path).is_file():
+            await asyncio.to_thread(shutil.copyfile, tg_file.file_path, target)
             source = Path(tg_file.file_path)
-            await asyncio.to_thread(shutil.copyfile, source, target)
         else:
             await tg_file.download_to_drive(custom_path=target, read_timeout=600)
         watcher.cancel()

@@ -225,6 +225,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The core's listening socket does not survive iOS suspending the app;
+    /// this makes it listen again and adopts its address if that changed.
+    func resume() {
+        guard let old = api else { return }
+        var err: NSError?
+        let out = MobileResume(&err)
+        guard err == nil, let info = try? JSONDecoder().decode([String: String].self, from: Data(out.utf8)),
+              let u = info["url"].flatMap(URL.init(string:)), let t = info["token"] else { return }
+        if u != old.base { api = API(base: u, token: t) }
+    }
+
     func refreshSetup() async {
         guard let api else { return }
         if let s: SetupStatus = try? await api.get("api/setup") { setup = s }

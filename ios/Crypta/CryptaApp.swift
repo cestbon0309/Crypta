@@ -59,13 +59,15 @@ struct RootView: View {
 
 struct MainTabs: View {
     @EnvironmentObject var model: AppModel
+    @StateObject private var nav = BrowserNav()
 
     var body: some View {
         TabView {
-            NavigationStack {
+            NavigationStack(path: $nav.path) {
                 BrowserView(path: "")
                     .navigationDestination(for: Item.self) { BrowserView(path: $0.path) }
             }
+            .environmentObject(nav)
             .tabItem { Label("文件", systemImage: "folder") }
 
             NavigationStack { TransfersView() }

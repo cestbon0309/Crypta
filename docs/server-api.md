@@ -37,6 +37,22 @@ POST /api/transfers
 
 核心用 pikpakcli 把它下载到 `/downloads/pikpak/`，再给里面每个文件各建一个上传任务，文件夹结构保持不变。
 
+插件自己下载要花时间的话，可以先把任务挂出来，让下载进度也显示在 App 和进度网页里：
+
+```http
+POST /api/transfers
+{"kind": "upload", "pending": true, "name": "video.mp4", "size": 1500000000, "remote": "Telegram"}
+
+POST /api/transfers/{id}/progress      下载期间随时调用；返回任务，state 变成 canceled 说明用户取消了
+{"done": 420000000, "size": 1500000000}
+
+POST /api/transfers/{id}/ready         文件已放进 /downloads，开始加密上传
+{"local": "telegram/123/video.mp4", "deleteSource": true}
+
+POST /api/transfers/{id}/fail          下载失败
+{"error": "原因"}
+```
+
 返回值里的 `id` 用来查进度。`plugins/telegram/bot.py` 是一个完整的例子。
 
 ## 任务

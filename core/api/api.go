@@ -162,6 +162,37 @@ func (s *Server) Handler() http.Handler {
 		s.Transfers.ClearFinished()
 		s.done(w, nil)
 	}))
+	mux.HandleFunc("POST /api/transfers/{id}/progress", s.Authed(func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Done, Size int64 }
+		if err := decode(r, &in); err != nil {
+			Fail(w, err)
+			return
+		}
+		s.transfer(w)(s.Transfers.Report(r.PathValue("id"), in.Done, in.Size))
+	}))
+	mux.HandleFunc("POST /api/transfers/{id}/ready", s.Authed(func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Local        string
+			DeleteSource bool
+		}
+		err := decode(r, &in)
+		if err == nil {
+			in.Local, err = s.local(in.Local)
+		}
+		if err != nil {
+			Fail(w, err)
+			return
+		}
+		s.transfer(w)(s.Transfers.Ready(r.PathValue("id"), in.Local, in.DeleteSource))
+	}))
+	mux.HandleFunc("POST /api/transfers/{id}/fail", s.Authed(func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Error string }
+		if err := decode(r, &in); err != nil {
+			Fail(w, err)
+			return
+		}
+		s.done(w, s.Transfers.Fail(r.PathValue("id"), in.Error))
+	}))
 	mux.HandleFunc("POST /api/transfers/{id}/{action}", s.Authed(func(w http.ResponseWriter, r *http.Request) {
 		s.done(w, s.Transfers.Act(r.PathValue("id"), r.PathValue("action")))
 	}))
@@ -187,10 +218,45 @@ func (s *Server) done(w http.ResponseWriter, err error) {
 	JSON(w, 200, map[string]bool{"ok": true})
 }
 
+func (s *Server) transfer(w http.ResponseWriter) func(*engine.Transfer, error) {
+	return func(t *engine.Transfer, err error) {
+		if err != nil {
+			Fail(w, err)
+			return
+		}
+		JSON(w, 200, t)
+	}
+}
+
+// local resolves the path of a file to upload. On a server, relative paths
+// are inside the shared downloads folder and nothing outside of it may be
+// uploaded.
+func (s *Server) local(p string) (string, error) {
+	if s.LocalRoot == "" {
+		return p, nil
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(s.LocalRoot, p)
+	}
+	p = filepath.Clean(p)
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	root := filepath.Clean(s.LocalRoot)
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if !strings.HasPrefix(p, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("local path must be inside %s", s.LocalRoot)
+	}
+	return p, nil
+}
+
 func (s *Server) addTransfer(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Kind, Local, Remote, URL, Name, Source string
-		DeleteSource                           bool
+		DeleteSource, Pending                  bool
+		Size                                   int64
 	}
 	if err := decode(r, &in); err != nil {
 		Fail(w, err)
@@ -201,26 +267,16 @@ func (s *Server) addTransfer(w http.ResponseWriter, r *http.Request) {
 			Fail(w, errors.New("this server only accepts upload and url jobs"))
 			return
 		}
-		if in.Kind == engine.KindUpload {
-			// Relative paths are inside the shared downloads folder; nothing
-			// outside of it may be uploaded.
-			p := in.Local
-			if !filepath.IsAbs(p) {
-				p = filepath.Join(s.LocalRoot, p)
-			}
-			p = filepath.Clean(p)
-			if resolved, err := filepath.EvalSymlinks(p); err == nil {
-				p = resolved
-			}
-			root := filepath.Clean(s.LocalRoot)
-			if resolved, err := filepath.EvalSymlinks(root); err == nil {
-				root = resolved
-			}
-			if !strings.HasPrefix(p, root+string(filepath.Separator)) {
-				Fail(w, fmt.Errorf("local path must be inside %s", s.LocalRoot))
-				return
-			}
-			in.Local = p
+	}
+	if in.Kind == engine.KindUpload && in.Pending {
+		s.transfer(w)(s.Transfers.AddExternal(in.Name, in.Remote, in.Size))
+		return
+	}
+	if in.Kind == engine.KindUpload {
+		var err error
+		if in.Local, err = s.local(in.Local); err != nil {
+			Fail(w, err)
+			return
 		}
 	}
 	t, err := s.Transfers.Add(engine.Transfer{Kind: in.Kind, Local: in.Local, Remote: in.Remote, URL: in.URL, Name: in.Name, DeleteSource: in.DeleteSource})

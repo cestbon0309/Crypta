@@ -316,7 +316,7 @@ struct PathBar: View {
                 .buttonStyle(.plain)
                 .padding(.horizontal, 16).padding(.vertical, 8)
             }
-            .onAppear { proxy.scrollTo("last", anchor: .trailing) }
+            .onAppear { proxy.scrollTo("last") }
         }
         .background(.bar)
         .overlay(alignment: .bottom) { Divider() }

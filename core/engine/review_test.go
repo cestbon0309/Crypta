@@ -239,6 +239,12 @@ func TestUploadNameIsHeld(t *testing.T) {
 	if err := m.Mkdir(ctx, fs, "a (2).txt"); err == nil {
 		t.Fatal("made a folder on a name an upload holds")
 	}
+	if err := m.Mkdir(ctx, fs, "a (2).txt/sub"); err == nil {
+		t.Fatal("made a folder under a name an upload holds")
+	}
+	if err := m.Move(ctx, fs, "other.txt", "a (2).txt/other.txt"); err == nil {
+		t.Fatal("moved under a name an upload holds")
+	}
 	if err := m.Move(ctx, fs, "other.txt", "b.txt"); err != nil {
 		t.Fatal(err)
 	}

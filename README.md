@@ -48,6 +48,25 @@ password2 = ...
 
 ## 二、服务器
 
+一行安装（Linux 服务器；没有 Docker 会先装 Docker，然后拉代码、问几个问题生成 `.env`、启动并显示配对码）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cestbon0309/Crypta/main/scripts/install.sh | bash
+```
+
+仓库是私有的时候要带一个能读这个仓库的 GitHub 令牌：
+
+```bash
+export GITHUB_TOKEN=ghp_xxx
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" https://raw.githubusercontent.com/cestbon0309/Crypta/main/scripts/install.sh | bash
+```
+
+- 默认装到 `~/crypta`；再跑一次就是更新，已有的 `.env` 不会被改。
+- 不想被提问可以提前给变量：`CRYPTA_DOMAIN`、`RCLONE_CONF`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_ALLOWED_USERS`，再加 `CRYPTA_YES=1`。
+- 不填域名时没有 HTTPS，App 只能在局域网内配对；不填 rclone.conf 时是演示模式。
+
+手动安装：
+
 ```bash
 cp .env.example .env        # 填 CRYPTA_PUBLIC_URL、CRYPTA_DOMAIN
 cp ~/.config/rclone/rclone.conf ./rclone.conf

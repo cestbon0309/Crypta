@@ -106,14 +106,60 @@ func (f *FS) dropChunks(ctx context.Context, dirID, name string) error {
 	return nil
 }
 
-// dropChunksAt is dropChunks for a full path.
-func (f *FS) dropChunksAt(ctx context.Context, p string) error {
-	parent, name := split(Clean(p))
-	dc, err := f.dir(ctx, parent, false)
-	if err != nil {
+// dropLoose is dropChunks for chunks that are not part of a file: when the
+// name is a file by now (stored by someone else), its chunks stay.
+func (f *FS) dropLoose(ctx context.Context, dirID, name string) error {
+	if dirID == "" {
+		return nil
+	}
+	n, isFile, err := f.chunksOf(ctx, dirID, name)
+	if err != nil || isFile || n == 0 {
 		return err
 	}
-	return f.dropChunks(ctx, dc.id, name)
+	return f.dropChunks(ctx, dirID, name)
+}
+
+// countChunks is how many chunks .001 ... of name a directory holds.
+func (f *FS) countChunks(ctx context.Context, dirID, name string) (int, error) {
+	n, _, err := f.chunksOf(ctx, dirID, name)
+	return n, err
+}
+
+func (f *FS) chunksOf(ctx context.Context, dirID, name string) (n int, isFile bool, err error) {
+	entries, err := f.R.List(ctx, dirID)
+	if err != nil {
+		return 0, false, err
+	}
+	seen := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir {
+			continue
+		}
+		plain, err := f.C.DecryptName(e.Name, false)
+		if err != nil {
+			continue
+		}
+		if plain == name {
+			isFile = true
+		}
+		if base, ok := isChunk(plain); ok && base == name && !seen[plain] {
+			seen[plain] = true
+			n++
+		}
+	}
+	return n, isFile, nil
+}
+
+// invalidateID forgets the listing of the directory with this remote id,
+// wherever it is now.
+func (f *FS) invalidateID(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, dc := range f.dirs {
+		if dc.id == id {
+			dc.items = nil
+		}
+	}
 }
 
 // partsReader reads a range of a chunked file, one chunk after the other.

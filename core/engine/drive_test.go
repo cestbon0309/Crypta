@@ -231,6 +231,30 @@ func TestDriveChunkedResume(t *testing.T) {
 		t.Fatal("resumed chunked upload is corrupt")
 	}
 
+	// Paused, its folder renamed, resumed: the file is whole in the folder
+	// under its new name.
+	tr3, _ := m.Add(Transfer{Kind: KindUpload, Local: "movie.mkv", Remote: "third"})
+	interrupt(m, tr3.ID)
+	m.Act(tr3.ID, "pause")
+	time.Sleep(100 * time.Millisecond)
+	if err := fs.Move(ctx, "third", "fourth"); err != nil {
+		t.Fatal(err)
+	}
+	m.Act(tr3.ID, "resume")
+	waitState(t, m, tr3.ID, StateDone)
+	if _, err := fs.Stat(ctx, "third"); err == nil {
+		t.Fatal("the renamed folder came back")
+	}
+	if it, err = fs.Stat(ctx, "fourth/movie.mkv"); err != nil || it.Size != int64(len(data)) {
+		t.Fatalf("after the rename: %v %+v", err, it)
+	}
+	rc, _ = fs.Open(ctx, it, 0, -1)
+	got, _ = io.ReadAll(rc)
+	rc.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatal("upload resumed after a folder rename is corrupt")
+	}
+
 	// Canceled half way: the chunks go, the name stays free.
 	tr2, _ := m.Add(Transfer{Kind: KindUpload, Local: "movie.mkv", Remote: "other"})
 	interrupt(m, tr2.ID)

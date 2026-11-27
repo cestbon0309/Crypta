@@ -90,6 +90,10 @@ type Transfer struct {
 	SrcMod  time.Time `json:"srcMod,omitzero"`
 	// Parts is set once the name of a chunked upload has been taken.
 	Parts []*Part `json:"parts,omitempty"`
+	// Chunk is their size and DirID the folder they go to, which may have
+	// been renamed or moved since.
+	Chunk int64  `json:"chunk,omitempty"`
+	DirID string `json:"dirID,omitempty"`
 	// ETag or Last-Modified of a partly fetched URL, sent as If-Range.
 	Validator string `json:"validator,omitempty"`
 
@@ -108,7 +112,7 @@ type Manager struct {
 	wake      chan struct{}
 	lastSave  time.Time
 	Workers   int
-	parallel int
+	parallel  int
 	// RetryDelay is the base wait before a failed upload chunk is retried.
 	RetryDelay time.Duration
 	// AllowPrivateURLs lets URL jobs reach loopback, private and link-local
@@ -268,11 +272,11 @@ func (m *Manager) cleanup(t *Transfer) {
 	}
 	if len(t.Parts) > 0 && t.State == StateCanceled && m.fs != nil {
 		// The chunks sent so far are not a file and never will be.
-		go func(fs *FS, p string) {
+		go func(fs *FS, dirID, name string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			fs.dropChunksAt(ctx, p)
-		}(m.fs, t.Remote)
+			fs.dropLoose(ctx, dirID, name)
+		}(m.fs, t.DirID, path.Base(t.Remote))
 	}
 	if t.Kind == KindPikPak && t.State == StateCanceled {
 		os.RemoveAll(m.pikpakDir(t.ID))
@@ -470,7 +474,7 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 	if !resumed {
 		if len(t.Parts) > 0 {
 			// The source changed and is now small: its old chunks go.
-			if err := fs.dropChunksAt(ctx, t.Remote); err != nil {
+			if err := fs.dropLoose(ctx, t.DirID, path.Base(t.Remote)); err != nil {
 				return err
 			}
 		}
@@ -515,7 +519,11 @@ func (m *Manager) upload(ctx context.Context, t *Transfer, fs *FS) error {
 func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.File, fi os.FileInfo) error {
 	size, mod, chunk := fi.Size(), fi.ModTime(), fs.ChunkSize
 	count := int((size + chunk - 1) / chunk)
-	if len(t.Parts) != count || !t.SrcMod.Equal(mod) || t.Size != size {
+	if len(t.Parts) > 0 && t.Chunk > 0 && t.DirID != "" && t.SrcMod.Equal(mod) && t.Size == size {
+		// Under way: the chunks keep the size and the folder they started with.
+		chunk = t.Chunk
+		count = len(t.Parts)
+	} else {
 		err := m.claim(ctx, t, fs, func(dc *dirCache, parent, name string) error {
 			// Chunks under this name are leftovers of an upload given up.
 			if err := fs.dropChunks(ctx, dc.id, name); err != nil {
@@ -526,7 +534,7 @@ func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.
 				parts[i] = &Part{}
 			}
 			m.update(t, func() {
-				t.Remote, t.Name, t.Parts = path.Join(parent, name), name, parts
+				t.Remote, t.Name, t.Parts, t.Chunk, t.DirID = path.Join(parent, name), name, parts, chunk, dc.id
 				t.Nonce, t.Session, t.SrcMod, t.Size, t.Done = nil, "", mod, size, 0
 			})
 			return nil
@@ -536,10 +544,7 @@ func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.
 		}
 	}
 	parent, name := split(Clean(t.Remote))
-	dc, err := fs.dir(ctx, parent, true)
-	if err != nil {
-		return err
-	}
+	dirID := t.DirID
 	m.update(t, func() { t.Phase = "uploading" })
 
 	// rclone records the MD5 of the whole file; it is read alongside.
@@ -593,7 +598,7 @@ func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.
 				return
 			}
 			defer func() { <-slots }()
-			err := m.sendPart(pctx, t, fs, dc.id, name, i, io.NewSectionReader(src, int64(i)*chunk, partSize(i)), mod,
+			err := m.sendPart(pctx, t, fs, dirID, name, i, io.NewSectionReader(src, int64(i)*chunk, partSize(i)), mod,
 				func(plain int64, stored bool) { report(i, plain, stored) })
 			if err != nil {
 				mu.Lock()
@@ -613,12 +618,19 @@ func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.
 	if hash == "" {
 		return errors.New("could not read the file for its checksum")
 	}
+	// Chunks deleted behind the upload's back would make a short file.
+	if n, err := fs.countChunks(ctx, dirID, name); err != nil {
+		return err
+	} else if n != count {
+		m.update(t, func() { t.Parts = nil })
+		return fmt.Errorf("%d of %d chunks are on the remote; the upload starts over", n, count)
+	}
 	meta := fmt.Sprintf(`{"ver":1,"size":%d,"nchunks":%d,"md5":"%s"}`, size, count, hash)
 	nonce, err := crypt.NewNonce()
 	if err != nil {
 		return err
 	}
-	session, err := fs.R.StartUpload(ctx, dc.id, fs.C.EncryptName(name, false), "", crypt.EncryptedSize(int64(len(meta))), mod)
+	session, err := fs.R.StartUpload(ctx, dirID, fs.C.EncryptName(name, false), "", crypt.EncryptedSize(int64(len(meta))), mod)
 	if err != nil {
 		return err
 	}
@@ -626,6 +638,7 @@ func (m *Manager) uploadParts(ctx context.Context, t *Transfer, fs *FS, src *os.
 		return err
 	}
 	fs.invalidate(parent)
+	fs.invalidateID(dirID)
 	return nil
 }
 

@@ -58,6 +58,7 @@ $DOCKER compose version >/dev/null 2>&1 || die "the Docker Compose plugin is mis
 say "Fetching Crypta into $DIR"
 # The token is handed to git by a helper that reads it from the environment,
 # so it is neither written to .git/config nor visible in the process list.
+# Saved logins are bypassed: they must not win over the token or store it.
 git_auth() {
 	if [ -z "${GITHUB_TOKEN:-}" ]; then
 		git "$@"
@@ -73,7 +74,7 @@ Username*) echo x-access-token ;;
 esac
 ASKPASS
 	chmod 700 "$helper"
-	GITHUB_TOKEN=$GITHUB_TOKEN GIT_ASKPASS=$helper GIT_TERMINAL_PROMPT=0 git "$@" || rc=$?
+	GITHUB_TOKEN=$GITHUB_TOKEN GIT_ASKPASS=$helper GIT_TERMINAL_PROMPT=0 git -c credential.helper= "$@" || rc=$?
 	rm -f "$helper"
 	return $rc
 }

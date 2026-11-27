@@ -220,9 +220,17 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var confirmReset = false
     @State private var confirmUnpair = false
+    @AppStorage(Prefs.showThumbnails) private var showThumbnails = true
 
     var body: some View {
         Form {
+            Section {
+                Toggle("显示缩略图", isOn: $showThumbnails)
+            } header: {
+                Text("浏览")
+            } footer: {
+                Text("打开后，图片会显示缩略图。文件是加密保存的，所以第一次显示时要把图片下载下来才能生成缩略图（超过 30 MB 的图片除外），之后会保存在本机。")
+            }
             Section("存储") {
                 LabeledContent("当前", value: model.setup.demo ? "演示模式（仅本机）" : "Google Drive（rclone crypt）")
                 NavigationLink { ImportView() } label: { Label("导入 rclone.conf", systemImage: "doc.badge.gearshape") }
@@ -250,6 +258,9 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("设置")
+        .onChange(of: showThumbnails) { on in
+            if !on { Task { await ThumbnailStore.shared.clear() } }
+        }
         .confirmationDialog("清除本机配置？", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("清除", role: .destructive) { Task { try? await model.configure("api/setup/reset") } }
         }

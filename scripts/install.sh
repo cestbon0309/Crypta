@@ -94,7 +94,7 @@ else
 fi
 cd "$DIR"
 
-val() { sed -n "s/^$1=//p" .env | tail -1; }
+val() { sed -n "s/^$1=//p" .env | tail -1 | tr -d '\r'; }
 
 # A domain is often typed as an address: https://example.com/ means example.com.
 domain_of() {

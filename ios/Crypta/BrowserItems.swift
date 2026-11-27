@@ -90,6 +90,8 @@ actor ThumbnailStore {
     private var loading: [String: Task<UIImage?, Never>] = [:]
     private var running = 0
     private var waiting: [CheckedContinuation<Void, Never>] = []
+    /// Bumped by `clear`, so a fetch that started earlier saves nothing.
+    private var generation = 0
 
     init() {
         memory.countLimit = 400
@@ -107,23 +109,28 @@ actor ThumbnailStore {
         if let hit = memory.object(forKey: key as NSString) { return hit }
         if let task = loading[key] { return await task.value }
         let file = dir.appendingPathComponent(key + ".jpg")
+        let started = generation
         let task = Task<UIImage?, Never> {
             if let saved = UIImage(contentsOfFile: file.path) { return saved }
             await self.acquire()
             defer { self.release() }
             guard !Task.isCancelled, let data = try? await api.data(item.path),
-                  let image = Self.downsample(data) else { return nil }
+                  let image = Self.downsample(data), self.generation == started else { return nil }
             try? image.jpegData(compressionQuality: 0.8)?.write(to: file, options: .atomic)
             return image
         }
         loading[key] = task
         let image = await task.value
+        guard generation == started else { return nil }
         loading[key] = nil
         if let image { memory.setObject(image, forKey: key as NSString) }
         return image
     }
 
     func clear() {
+        generation += 1
+        loading.values.forEach { $0.cancel() }
+        loading = [:]
         memory.removeAllObjects()
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -180,7 +187,7 @@ struct ItemIcon: View {
         .frame(width: size, height: size)
         .clipShape(shape)
         .overlay(shape.strokeBorder(Color.primary.opacity(0.06)))
-        .task(id: wantsThumbnail ? item.id : "") {
+        .task(id: wantsThumbnail ? "\(item.id)|\(item.size)|\(item.modTime.timeIntervalSince1970)" : "") {
             guard wantsThumbnail, let api = model.api else { thumbnail = nil; return }
             thumbnail = await ThumbnailStore.shared.image(for: item, api: api)
         }

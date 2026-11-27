@@ -318,7 +318,14 @@ struct PathBar: View {
                 .accessibilityLabel("Crypta")
             if start > 0 {
                 Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-                Text("…")
+                Menu {
+                    ForEach(Array(parts.prefix(start).enumerated()), id: \.offset) { i, name in
+                        Button(name) { go(i + 1) }
+                    }
+                } label: {
+                    Text("…").padding(.horizontal, 4)
+                }
+                .accessibilityLabel("上级文件夹")
             }
             ForEach(Array(parts.enumerated()).dropFirst(start), id: \.offset) { i, name in
                 Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)

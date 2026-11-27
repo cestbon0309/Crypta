@@ -390,13 +390,27 @@ func (f *FS) Move(ctx context.Context, src, dst string) error {
 			return err
 		}
 	}
+	_, srcName := split(it.Path)
 	for i, part := range it.parts {
-		if err := f.R.Move(ctx, part.id, sdc.id, ddc.id, f.C.EncryptName(chunkFile(name, i), false)); err != nil {
+		err := f.R.Move(ctx, part.id, sdc.id, ddc.id, f.C.EncryptName(chunkFile(name, i), false))
+		if err == nil && i == len(it.parts)-1 {
+			err = f.R.Move(ctx, it.id, sdc.id, ddc.id, f.C.EncryptName(name, false))
+		}
+		if err != nil {
+			// Back with the chunks that went: half a file on each side
+			// is a file on neither.
+			bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer cancel()
+			for j := i; j >= 0; j-- {
+				f.R.Move(bctx, it.parts[j].id, ddc.id, sdc.id, f.C.EncryptName(chunkFile(srcName, j), false))
+			}
 			return err
 		}
 	}
-	if err := f.R.Move(ctx, it.id, sdc.id, ddc.id, f.C.EncryptName(name, it.IsDir)); err != nil {
-		return err
+	if len(it.parts) == 0 {
+		if err := f.R.Move(ctx, it.id, sdc.id, ddc.id, f.C.EncryptName(name, it.IsDir)); err != nil {
+			return err
+		}
 	}
 	f.forget(it.Path)
 	return nil

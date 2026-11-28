@@ -39,6 +39,10 @@ type Server struct {
 	FailAfter int64
 	accepted  int64
 	Requests  int
+	served    int64
+	streams   int
+	// Streams is the most downloads that were running at one time.
+	Streams int
 }
 
 func New() *Server {
@@ -52,6 +56,13 @@ func (s *Server) Accepted() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.accepted
+}
+
+// Served is the number of download bytes sent so far.
+func (s *Server) Served() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.served
 }
 
 func (s *Server) id() string { s.next++; return fmt.Sprintf("id%d", s.next) }
@@ -157,7 +168,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			data = data[start : end+1]
 			w.WriteHeader(206)
 		}
-		w.Write(data)
+		// Streams run side by side, as on Drive.
+		s.streams++
+		s.Streams = max(s.Streams, s.streams)
+		s.mu.Unlock()
+		n, _ := w.Write(data)
+		s.mu.Lock()
+		s.streams--
+		s.served += int64(n)
 	default:
 		http.Error(w, "unknown", 400)
 	}

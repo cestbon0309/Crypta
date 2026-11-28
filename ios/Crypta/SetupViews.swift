@@ -245,6 +245,20 @@ struct SettingsView: View {
             } footer: {
                 Text("超过 256 MB 的文件会按 rclone chunker 的格式切成分片，几片同时上传。数值越大越快，占用的内存也越多（每片约 16 MB）。对新开始的上传生效。")
             }
+            Section {
+                Picker("同时下载的分片数", selection: Binding(
+                    get: { model.setup.segments },
+                    set: { n in
+                        model.setup.segments = n
+                        Task { if let s: SetupStatus = try? await model.api?.post("api/setup/segments", ["segments": n]) { model.setup = s } }
+                    })) {
+                    ForEach([1, 2, 4, 6, 8, 12, 16], id: \.self) { Text("\($0)").tag($0) }
+                }
+            } header: {
+                Text("下载")
+            } footer: {
+                Text("下载到本机时，一个文件分成几段同时下载，每段一条连接。数值越大通常越快，网络较差时可以调小。对新开始的下载生效。")
+            }
             Section("存储") {
                 LabeledContent("当前", value: model.setup.demo ? "演示模式（仅本机）" : "Google Drive（rclone crypt）")
                 NavigationLink { ImportView() } label: { Label("导入 rclone.conf", systemImage: "doc.badge.gearshape") }

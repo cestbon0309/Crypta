@@ -78,8 +78,8 @@ extension Item {
 // MARK: - Thumbnails
 
 /// Small previews of images and videos, kept on disk. The server stores one
-/// next to what it uploads; an image without one is fetched and made small
-/// on the phone.
+/// for what it uploads, and makes one when it is asked for a file that has
+/// none. Without a server, an image is fetched and made small on the phone.
 actor ThumbnailStore {
     static let shared = ThumbnailStore()
     /// Larger images are not fetched just to make a preview.
@@ -104,7 +104,43 @@ actor ThumbnailStore {
         return SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    func image(for item: Item, api: API) async -> UIImage? {
+    /// How long after the server was asked its thumbnail is looked for, in seconds.
+    private static let waits: [UInt64] = [4, 8, 16, 32, 64, 128]
+    /// Paths to ask the server for, sent together shortly after the first.
+    private var asking: [String] = []
+    private var asked: Task<Bool, Never>?
+
+    /// Asks the paired server to make the thumbnail; false when it cannot be reached.
+    private func ask(_ path: String, _ server: API) async -> Bool {
+        asking.append(path)
+        if asked == nil {
+            asked = Task {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                return await self.sendAsked(server)
+            }
+        }
+        return await asked!.value
+    }
+
+    private func sendAsked(_ server: API) async -> Bool {
+        let paths = asking
+        asking = []
+        asked = nil
+        struct Reply: Decodable { let queued: Int }
+        let reply: Reply? = try? await server.post("api/thumbs", ["paths": paths])
+        return reply != nil
+    }
+
+    /// The thumbnail stored on the remote, if there is one.
+    private func stored(_ item: Item, _ api: API) async -> Data? {
+        await acquire()
+        defer { release() }
+        guard !Task.isCancelled, let data = try? await api.data(item.path, from: "api/thumb"),
+              UIImage(data: data) != nil else { return nil }
+        return data
+    }
+
+    func image(for item: Item, api: API, server: API?) async -> UIImage? {
         guard item.kind == .image || item.kind == .video else { return nil }
         let key = Self.key(item)
         if let hit = memory.object(forKey: key as NSString) { return hit }
@@ -113,14 +149,23 @@ actor ThumbnailStore {
         let started = generation
         let task = Task<UIImage?, Never> {
             if let saved = UIImage(contentsOfFile: file.path) { return saved }
-            await self.acquire()
-            defer { self.release() }
-            guard !Task.isCancelled else { return nil }
-            if let data = try? await api.data(item.path, from: "api/thumb"), let image = UIImage(data: data) {
+            var data = await self.stored(item, api)
+            if data == nil, let server, await self.ask(item.path, server) {
+                for wait in Self.waits where data == nil {
+                    try? await Task.sleep(nanoseconds: wait * 1_000_000_000)
+                    guard !Task.isCancelled, self.generation == started else { return nil }
+                    data = await self.stored(item, api)
+                }
+                // The server was there and made none: the phone does not try either.
+                guard data != nil || item.kind == .image else { return nil }
+            }
+            if let data, let image = UIImage(data: data) {
                 guard self.generation == started else { return nil }
                 try? data.write(to: file, options: .atomic)
                 return image
             }
+            await self.acquire()
+            defer { self.release() }
             guard !Task.isCancelled, item.kind == .image, item.size <= Self.maxBytes,
                   let data = try? await api.data(item.path),
                   let image = Self.downsample(data), self.generation == started else { return nil }
@@ -203,7 +248,7 @@ struct ItemIcon: View {
         .overlay(shape.strokeBorder(Color.primary.opacity(0.06)))
         .task(id: wantsThumbnail ? "\(item.id)|\(item.size)|\(item.modTime.timeIntervalSince1970)" : "") {
             guard wantsThumbnail, let api = model.api else { thumbnail = nil; return }
-            thumbnail = await ThumbnailStore.shared.image(for: item, api: api)
+            thumbnail = await ThumbnailStore.shared.image(for: item, api: api, server: model.setup.demo ? nil : model.server)
         }
     }
 }

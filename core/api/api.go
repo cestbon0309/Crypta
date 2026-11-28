@@ -179,6 +179,16 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Length", strconv.FormatInt(it.Size, 10))
 		io.Copy(w, rc)
 	}))
+	// Ask for the thumbnails of stored pictures and videos that have none;
+	// they are made in the background.
+	mux.HandleFunc("POST /api/thumbs", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
+		var in struct{ Paths []string }
+		if err := decode(r, &in); err != nil {
+			Fail(w, err)
+			return
+		}
+		JSON(w, 200, map[string]any{"queued": s.Transfers.RequestThumbs(r.Context(), fs, in.Paths)})
+	}))
 	mux.HandleFunc("GET /api/media", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		it, err := fs.Stat(r.Context(), r.URL.Query().Get("path"))
 		if err != nil {

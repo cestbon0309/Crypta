@@ -137,6 +137,12 @@ type Manager struct {
 	Workers   int
 	parallel  int
 	segments  int
+	// Thumbnails asked for with RequestThumbs: those waiting, and the keys
+	// of those waiting or given up.
+	thumbMu   sync.Mutex
+	thumbWait []*Item
+	thumbSeen map[string]bool
+	thumbBusy bool
 	// RetryDelay is the base wait before a failed upload chunk is retried.
 	RetryDelay time.Duration
 	// AllowPrivateURLs lets URL jobs reach loopback, private and link-local

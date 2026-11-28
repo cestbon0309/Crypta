@@ -268,7 +268,15 @@ final class AppModel: ObservableObject {
         let active = list.filter(\.isActive).count
         if active != activeTransfers { activeTransfers = active }
         let done = Set(list.filter { $0.state == "done" && $0.kind != "download" }.map(\.id))
-        if !done.subtracting(doneIDs).isEmpty { uploadsFinished += 1 }
+        let fresh = done.subtracting(doneIDs)
+        if !fresh.isEmpty {
+            uploadsFinished += 1
+            // The server makes the thumbnails of what this phone stored.
+            let paths = list.filter { fresh.contains($0.id) }.map(\.remote)
+            if let server, !setup.demo { // a demo keeps its files on the phone
+                Task { let _: API.Empty? = try? await server.post("api/thumbs", ["paths": paths]) }
+            }
+        }
         doneIDs = done
     }
 

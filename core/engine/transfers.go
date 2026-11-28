@@ -241,7 +241,7 @@ func (m *Manager) schedule(ctx context.Context) {
 				running++
 			}
 		case StateQueued:
-			if t.cancel == nil { // the previous worker has exited
+			if !t.External && t.cancel == nil { // the previous worker has exited
 				queued = append(queued, t)
 			}
 		}
@@ -1173,18 +1173,29 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 // plugin reports how far it is with Report and hands the file over with
 // Ready, or gives up with Fail.
 func (m *Manager) AddExternal(name, remoteDir string, size int64) (*Transfer, error) {
+	return m.addExternal(name, remoteDir, size, StateRunning)
+}
+
+// AddExternalQueued lists an external upload that is queued in the plugin
+// waiting to start downloading. It transitions to StateRunning on the first
+// Report call and is never picked up by core workers until Ready.
+func (m *Manager) AddExternalQueued(name, remoteDir string, size int64) (*Transfer, error) {
+	return m.addExternal(name, remoteDir, size, StateQueued)
+}
+
+func (m *Manager) addExternal(name, remoteDir string, size int64, state string) (*Transfer, error) {
 	name = path.Base(filepath.ToSlash(name))
 	if name == "" || name == "." || name == "/" {
 		return nil, errors.New("name required")
 	}
-	t := &Transfer{ID: newID(), Kind: KindUpload, State: StateRunning, Phase: "downloading", External: true,
+	t := &Transfer{ID: newID(), Kind: KindUpload, State: state, Phase: "downloading", External: true,
 		Name: name, Remote: path.Join(Clean(remoteDir), name), Size: max(size, 0), CreatedAt: time.Now()}
 	m.mu.Lock()
 	m.items[t.ID] = t
 	m.saveLocked(true)
 	cp := *t
 	m.mu.Unlock()
-	log.Printf("file=%s transfer created kind=%s external=true size=%d", cp.ID, cp.Kind, cp.Size)
+	log.Printf("file=%s transfer created kind=%s external=true state=%s size=%d", cp.ID, cp.Kind, cp.State, cp.Size)
 	return &cp, nil
 }
 
@@ -1208,6 +1219,10 @@ func (m *Manager) Report(id string, done, size int64) (*Transfer, error) {
 	t, err := m.external(id)
 	if err != nil {
 		return nil, err
+	}
+	if t.State == StateQueued {
+		t.State, t.Phase = StateRunning, "downloading"
+		m.saveLocked(true)
 	}
 	if t.State == StateRunning {
 		now := time.Now()
@@ -1242,7 +1257,7 @@ func (m *Manager) Ready(id, local string, deleteSource bool) (*Transfer, error) 
 	if err != nil {
 		return nil, err
 	}
-	if t.State != StateRunning {
+	if t.State != StateRunning && t.State != StateQueued {
 		return nil, fmt.Errorf("the job is %s", t.State)
 	}
 	t.External, t.State, t.Phase, t.Speed, t.Done = false, StateQueued, "uploading", 0, 0
@@ -1263,7 +1278,7 @@ func (m *Manager) Fail(id, msg string) error {
 		return err
 	}
 	var snap *Transfer
-	if t.State == StateRunning {
+	if t.State == StateRunning || t.State == StateQueued {
 		t.State, t.Error, t.Speed = StateFailed, msg, 0
 		m.saveLocked(true)
 		cp := *t

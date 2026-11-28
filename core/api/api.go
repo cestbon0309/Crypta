@@ -303,7 +303,7 @@ func (s *Server) local(p string) (string, error) {
 func (s *Server) addTransfer(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Kind, Local, Remote, URL, Name, Source string
-		DeleteSource, Pending                  bool
+		DeleteSource, Pending, Queued          bool
 		Size                                   int64
 	}
 	if err := decode(r, &in); err != nil {
@@ -317,7 +317,11 @@ func (s *Server) addTransfer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.Kind == engine.KindUpload && in.Pending {
-		s.transfer(w)(s.Transfers.AddExternal(in.Name, in.Remote, in.Size))
+		if in.Queued {
+			s.transfer(w)(s.Transfers.AddExternalQueued(in.Name, in.Remote, in.Size))
+		} else {
+			s.transfer(w)(s.Transfers.AddExternal(in.Name, in.Remote, in.Size))
+		}
 		return
 	}
 	if in.Kind == engine.KindUpload {

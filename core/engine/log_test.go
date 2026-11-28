@@ -205,3 +205,54 @@ func TestTransferLifecycleLogsUseUUIDAndNeverLeakFilenames(t *testing.T) {
 		}
 	}
 }
+
+func TestExternalQueuedLifecycle(t *testing.T) {
+	m, fs, _ := driveRig(t)
+	// Queued external job must stay queued until the plugin reports progress.
+	q, err := m.AddExternalQueued("queued_secret.mp4", "Telegram", 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.State != StateQueued || !q.External {
+		t.Fatalf("expected queued external job, got %+v", q)
+	}
+	// Core scheduler must not pick up an external queued job.
+	m.kick()
+	time.Sleep(50 * time.Millisecond)
+	cur := m.List()[0]
+	if cur.ID != q.ID || cur.State != StateQueued {
+		t.Fatalf("scheduler touched external queued job: %+v", cur)
+	}
+	// First progress report transitions queued -> running.
+	rep, err := m.Report(q.ID, 128, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.State != StateRunning || rep.Phase != "downloading" || rep.Done != 128 {
+		t.Fatalf("unexpected state after report: %+v", rep)
+	}
+	// Ready hands off to core upload worker.
+	staged := filepath.Join(m.filesDir, "telegram", q.ID, "file")
+	os.MkdirAll(filepath.Dir(staged), 0o755)
+	os.WriteFile(staged, []byte("hello world"), 0o644)
+	if _, err := m.Ready(q.ID, staged, true); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, m, q.ID, StateDone)
+	if string(read(t, fs, "Telegram/queued_secret.mp4")) != "hello world" {
+		t.Fatal("uploaded content mismatch")
+	}
+
+	// Fail while still queued works cleanly.
+	q2, err := m.AddExternalQueued("queued_fail.mp4", "Telegram", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Fail(q2.ID, "boom"); err != nil {
+		t.Fatal(err)
+	}
+	if s := waitState(t, m, q2.ID, StateFailed); s.State != StateFailed {
+		t.Fatalf("expected failed state: %+v", s)
+	}
+}
+

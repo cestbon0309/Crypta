@@ -763,8 +763,10 @@ func (m *Manager) download(ctx context.Context, t *Transfer, fs *FS) error {
 	same := t.Size == it.Size && t.SrcMod.Equal(it.ModTime)
 	if !same || t.Piece != downloadPiece || len(t.Have) != (n+7)/8 || fi.Size() != it.Size {
 		have := make([]byte, (n+7)/8)
-		if same && t.Piece == 0 && fi.Size() <= it.Size {
-			// A part file written front to back by an earlier version.
+		if same && t.Piece == 0 && fi.Size() < it.Size {
+			// A part file written front to back by an earlier version. One
+			// already at full size may have been extended below without the
+			// bitmap reaching the disk, so it is not trusted.
 			for i := 0; i < int(fi.Size()/downloadPiece); i++ {
 				have[i/8] |= 1 << (i % 8)
 			}

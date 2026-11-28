@@ -154,6 +154,19 @@ func (s *Server) Handler() http.Handler {
 		s.done(w, fs.Delete(r.Context(), in.Path))
 	}))
 	mux.HandleFunc("GET /api/file", s.withFS(s.file))
+	mux.HandleFunc("GET /api/media", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
+		it, err := fs.Stat(r.Context(), r.URL.Query().Get("path"))
+		if err != nil {
+			Fail(w, err)
+			return
+		}
+		split, audio, err := fs.SplitTracks(r.Context(), it)
+		if err != nil {
+			Fail(w, err)
+			return
+		}
+		JSON(w, 200, map[string]any{"splitTracks": split, "audioTracks": audio})
+	}))
 	mux.HandleFunc("GET /api/transfers", s.Authed(func(w http.ResponseWriter, r *http.Request) {
 		JSON(w, 200, map[string]any{"transfers": s.Transfers.List()})
 	}))

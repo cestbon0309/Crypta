@@ -74,6 +74,7 @@ POST /api/transfers/{id}/fail          下载失败
 | `POST /api/move` `{"from","to"}` | 重命名或移动 |
 | `POST /api/delete` `{"path"}` | 移到回收站 |
 | `GET /api/file?path=...` | 读取解密后的内容，支持 `Range` |
+| `GET /api/media?path=...` | `{"splitTracks": true, "audioTracks": 1}`：MP4 的音频和视频存放位置相距很远，播放器要为两条轨道各开一个连接 |
 
 ## 配对
 

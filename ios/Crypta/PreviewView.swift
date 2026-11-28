@@ -191,9 +191,18 @@ final class Player: NSObject, ObservableObject, VLCMediaPlayerDelegate {
     // here and applied when playback resumes.
     private var pending: Double?
 
-    func open(_ url: URL) {
+    /// media.splitTracks: the file keeps the audio far from the video of the
+    /// same moment, so the audio is read over a second connection. With one,
+    /// VLC reconnects on every switch between the tracks and stalls after a
+    /// seek.
+    func open(_ url: URL, media info: API.Media? = nil) {
         let media = VLCMedia(url: url)
         media.addOption(":network-caching=1500")
+        if let info, info.splitTracks {
+            media.addOption(":input-slave=\(url.absoluteString)")
+            // The first audio track of the second connection.
+            media.addOption(":audio-track=\(info.audioTracks)")
+        }
         vlc.media = media
         vlc.delegate = self
         vlc.play()
@@ -294,10 +303,12 @@ struct PlayerView: View {
                 .transition(.opacity)
             }
         }
-        .onAppear {
-            if let api = model.api { player.open(api.fileURL(item.path)) }
-            UIApplication.shared.isIdleTimerDisabled = true
+        .task {
+            guard let api = model.api else { return }
+            let info = item.kind == .video ? try? await api.media(item.path) : nil
+            if !Task.isCancelled { player.open(api.fileURL(item.path), media: info) }
         }
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear {
             player.stop()
             UIApplication.shared.isIdleTimerDisabled = false

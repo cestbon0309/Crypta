@@ -145,6 +145,10 @@ struct API {
         return r.items
     }
 
+    struct Media: Decodable { let splitTracks: Bool; let audioTracks: Int }
+
+    func media(_ path: String) async throws -> Media { try await get("api/media", ["path": path]) }
+
     func transfers() async throws -> [Transfer] {
         let r: TransferList = try await get("api/transfers")
         return r.transfers

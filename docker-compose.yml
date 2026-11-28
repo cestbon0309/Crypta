@@ -25,6 +25,8 @@ services:
       - ${RCLONE_CONF:-./rclone.conf}:/config/rclone.conf:ro
       - crypta-data:/data
       - crypta-downloads:/downloads
+      # The files the Bot API server fetched, uploaded from where they are.
+      - telegram-bot-api:/downloads/telegram-bot-api
     ports:
       - "${CRYPTA_BIND:-127.0.0.1:8080}:8080"
 
@@ -39,12 +41,13 @@ services:
       TELEGRAM_REMOTE_DIR: ${TELEGRAM_REMOTE_DIR:-Telegram}
       TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-}
       TELEGRAM_LOCAL_MODE: ${TELEGRAM_LOCAL_MODE:-}
+      TELEGRAM_API_SHARE: telegram-bot-api
       TZ: ${TZ:-UTC}
     volumes:
       - crypta-data:/data:ro
       - crypta-downloads:/downloads
       # A local Bot API server hands the bot paths inside its data folder;
-      # writable, because the bot deletes each file once it has copied it.
+      # writable, because the bot moves each file to where the core takes it.
       - telegram-bot-api:/var/lib/telegram-bot-api
 
   # Self-hosted Bot API server: lifts the bot's download limit from 20 MB to

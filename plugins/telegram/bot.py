@@ -29,6 +29,9 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 LOCAL_MODE = os.environ.get("TELEGRAM_LOCAL_MODE") == "1"
 # The data folder of a self-hosted Bot API server, shared with this container.
 API_DIR = Path(os.environ.get("TELEGRAM_API_DIR", "/var/lib/telegram-bot-api"))
+# Where the core sees that folder, relative to its downloads folder. When set,
+# a fetched file is moved inside the folder instead of copied to the downloads.
+API_SHARE = os.environ.get("TELEGRAM_API_SHARE", "").strip("/")
 INTERVAL = 1  # seconds between updates of a progress message
 BAR = 10
 
@@ -101,8 +104,12 @@ class Status:
             log.warning("could not update the progress message: %s", e)
 
 
-async def follow(status: Status, job: dict, note: str = "") -> None:
-    """Keep the bot's reply up to date, once a second, until the job ends."""
+async def follow(status: Status, job: dict, note: str = "", stage: Path | None = None) -> None:
+    """Keep the bot's reply up to date, once a second, until the job ends.
+
+    stage is the folder the job's file was put in; the core deletes the
+    file after the upload and the folder goes once it is empty.
+    """
     phases = {"downloading": "下载到服务器", "uploading": "加密上传"}
     while True:
         await asyncio.sleep(INTERVAL)
@@ -128,6 +135,11 @@ async def follow(status: Status, job: dict, note: str = "") -> None:
         else:
             await status.show(progress(phases.get(cur.get("phase"), "处理中"), name, cur["done"], cur.get("size", 0), cur.get("speed", 0)))
         if cur["state"] in ("done", "failed", "canceled"):
+            if stage is not None:
+                try:
+                    stage.rmdir()
+                except OSError:
+                    pass
             return
 
 
@@ -207,14 +219,29 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         finally:
             receiving -= 1
         size, seen["have"], seen["phase"] = tg_file.file_size or size, True, "转存到上传目录"
-        target_dir.mkdir(parents=True, exist_ok=True)
+        local = None
         if LOCAL_MODE and tg_file.file_path and Path(tg_file.file_path).is_file():
-            await asyncio.to_thread(shutil.copyfile, tg_file.file_path, target)
             source = Path(tg_file.file_path)
+            if API_SHARE and source.is_relative_to(API_DIR):
+                target_dir = API_DIR / "crypta" / job["id"]
+                target = target_dir / name
+                target_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    source.rename(target)  # same volume: no copy
+                    source, local = None, f"{API_SHARE}/{target.relative_to(API_DIR)}"
+                except OSError as e:
+                    log.warning("could not move %s, copying it: %s", source, e)
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                    target_dir = DOWNLOADS / "telegram" / job["id"]
+                    target = target_dir / name
+            if local is None:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                await asyncio.to_thread(shutil.copyfile, source, target)
         else:
+            target_dir.mkdir(parents=True, exist_ok=True)
             await tg_file.download_to_drive(custom_path=target, read_timeout=600)
         watcher.cancel()
-        job = await core("POST", f"/api/transfers/{job['id']}/ready", {"local": str(target.relative_to(DOWNLOADS)), "deleteSource": True})
+        job = await core("POST", f"/api/transfers/{job['id']}/ready", {"local": local or str(target.relative_to(DOWNLOADS)), "deleteSource": True})
     except Exception as e:
         watcher.cancel()
         log.exception("media failed")
@@ -230,14 +257,14 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await status.show(f"❌ {name} 失败：{e}{hint}", final=True)
         return
     finally:
-        # The Bot API server keeps every file it fetched; ours is copied by now.
+        # The Bot API server keeps every file it fetched; ours is copied or moved by now.
         if source is not None:
             try:
                 source.unlink()
             except OSError as e:
                 log.warning("could not delete %s: %s", source, e)
                 note = "\n⚠️ Bot API 服务器上的原始文件没能删除（它的数据目录对机器人是只读的），请把挂载改成可写。"
-    context.application.create_task(follow(status, job, note))
+    context.application.create_task(follow(status, job, note, target_dir))
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

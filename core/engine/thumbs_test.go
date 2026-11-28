@@ -330,11 +330,35 @@ func TestRequestThumbs(t *testing.T) {
 	if w, h, _, _, b := look("media/photo.png"); w != 320 || h != 213 || b < 150 {
 		t.Fatalf("picture thumbnail %dx%d, blue %d", w, h, b)
 	}
+	// A file another device stored in a folder it made, after this one
+	// listed the root.
+	other, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	om, err := NewManager(filepath.Join(dir, "state2"), files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	om.SetFS(other)
+	go om.Run(ctx)
+	os.Setenv("PATH", t.TempDir())
+	tr, err := om.Add(Transfer{Kind: KindUpload, Local: "photo.png", Remote: "new/deep"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, om, tr.ID, StateDone)
+	os.Setenv("PATH", path)
+	if n := m.RequestThumbs(ctx, fs, []string{"new/deep/photo.png"}); n != 1 {
+		t.Fatalf("%d queued for a file in a new folder", n)
+	}
+	idle()
+	look("new/deep/photo.png")
 	// The broken video gave nothing and is not tried again; the rest have theirs.
 	if n := m.RequestThumbs(ctx, fs, all); n != 0 {
 		t.Fatalf("%d queued again", n)
 	}
-	if list, _ := fs.List(ctx, ThumbDir, true); len(list) != 2 {
+	if list, _ := fs.List(ctx, ThumbDir, true); len(list) != 3 {
 		t.Fatalf("%d thumbnails stored", len(list))
 	}
 }

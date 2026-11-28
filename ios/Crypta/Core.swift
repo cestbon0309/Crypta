@@ -273,7 +273,7 @@ final class AppModel: ObservableObject {
             uploadsFinished += 1
             // The server makes the thumbnails of what this phone stored.
             let paths = list.filter { fresh.contains($0.id) }.map(\.remote)
-            if let server {
+            if let server, !setup.demo { // a demo keeps its files on the phone
                 Task { let _: API.Empty? = try? await server.post("api/thumbs", ["paths": paths]) }
             }
         }

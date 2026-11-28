@@ -248,7 +248,7 @@ struct ItemIcon: View {
         .overlay(shape.strokeBorder(Color.primary.opacity(0.06)))
         .task(id: wantsThumbnail ? "\(item.id)|\(item.size)|\(item.modTime.timeIntervalSince1970)" : "") {
             guard wantsThumbnail, let api = model.api else { thumbnail = nil; return }
-            thumbnail = await ThumbnailStore.shared.image(for: item, api: api, server: model.server)
+            thumbnail = await ThumbnailStore.shared.image(for: item, api: api, server: model.setup.demo ? nil : model.server)
         }
     }
 }

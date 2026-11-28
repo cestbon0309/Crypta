@@ -38,12 +38,15 @@ const (
 	// How many thumbnails may wait to be made, and how many files that
 	// gave none are remembered so that they are not tried again.
 	thumbQueue = 5000
+	// The demuxers ffmpeg may use.
+	thumbFormats = "mov,matroska,webm,avi,asf,flv,live_flv,mpegts,mpeg,mpegvideo,rm,ogg,m4v,h264,hevc,ivf,nut," +
+		"image2,image2pipe,jpeg_pipe,png_pipe,apng,gif,gif_pipe,webp_pipe,bmp_pipe,tiff_pipe,mjpeg"
 )
 
 var (
 	plainID   = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 	imageExts = map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true, ".bmp": true, ".tif": true, ".tiff": true, ".heic": true, ".heif": true, ".avif": true}
-	videoExts = map[string]bool{".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".webm": true, ".avi": true, ".wmv": true, ".flv": true, ".ts": true, ".m2ts": true, ".mpg": true, ".mpeg": true, ".rm": true, ".rmvb": true, ".3gp": true}
+	videoExts = map[string]bool{".mp4": true, ".m4v": true, ".mov": true, ".mkv": true, ".webm": true, ".avi": true, ".wmv": true, ".flv": true, ".ts": true, ".m2ts": true, ".mpg": true, ".mpeg": true, ".rm": true, ".rmvb": true, ".3gp": true, ".vob": true, ".ogv": true, ".asf": true}
 )
 
 func thumbKey(it *Item) string {
@@ -96,10 +99,17 @@ func frame(ctx context.Context, file, name string) ([]byte, error) {
 	if err != nil {
 		return nil, nil
 	}
-	args := []string{"-v", "error", "-nostdin"}
+	// The file is not trusted: ffmpeg may open nothing but the file itself,
+	// and reads it as a picture or a video container only, never as a
+	// playlist that names other files or addresses.
+	only := []string{"-protocol_whitelist", "file", "-format_whitelist", thumbFormats}
+	if strings.HasPrefix(file, "http://") {
+		only[1] = "http,tcp"
+	}
+	args := append([]string{"-v", "error", "-nostdin"}, only...)
 	if videoExts[ext] {
 		if ffprobe, err := exec.LookPath("ffprobe"); err == nil {
-			out, _ := exec.CommandContext(ctx, ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file).Output()
+			out, _ := exec.CommandContext(ctx, ffprobe, append(only, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file)...).Output()
 			if d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64); err == nil && d > 0 {
 				args = append(args, "-ss", strconv.FormatFloat(d*thumbAt, 'f', 3, 64))
 			}
@@ -259,11 +269,20 @@ func (m *Manager) RequestThumbs(ctx context.Context, fs *FS, paths []string) int
 		}
 		it, err := fs.Stat(ctx, p)
 		if parent, _ := split(p); errors.Is(err, remote.ErrNotFound) && !listed[parent] {
-			// Just stored by another device, perhaps.
+			// Just stored by another device, perhaps, in a folder it just
+			// made: every folder on the way is listed again.
 			listed[parent] = true
-			if _, _, err = fs.list(ctx, parent, false, true); err == nil {
-				it, err = fs.Stat(ctx, p)
+			dir := ""
+			for _, name := range append([]string{""}, strings.Split(parent, "/")...) {
+				if dir = path.Join(dir, name); name == "" && dir != "" || listed["/"+dir] {
+					continue
+				}
+				listed["/"+dir] = true
+				if _, _, err := fs.list(ctx, dir, false, true); err != nil {
+					break
+				}
 			}
+			it, err = fs.Stat(ctx, p)
 		}
 		if err != nil || it.IsDir {
 			continue

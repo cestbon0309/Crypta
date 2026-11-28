@@ -124,8 +124,8 @@ struct API {
         try await send("POST", path, body: body, timeout: timeout)
     }
 
-    func data(_ path: String, range: ClosedRange<Int64>? = nil) async throws -> Data {
-        var req = URLRequest(url: url("api/file", ["path": path]))
+    func data(_ path: String, range: ClosedRange<Int64>? = nil, from endpoint: String = "api/file") async throws -> Data {
+        var req = URLRequest(url: url(endpoint, ["path": path]))
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if let range { req.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range") }
         let (data, resp) = try await URLSession.shared.data(for: req)

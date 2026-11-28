@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -270,9 +271,17 @@ func (m *Manager) run(ctx context.Context, t *Transfer, fs *FS) {
 	default:
 		err = fmt.Errorf("unknown kind %q", t.Kind)
 	}
+	stored := err == nil && (t.Kind == KindUpload || t.Kind == KindURL)
+	if stored {
+		if terr := m.thumbnail(ctx, t, fs); terr != nil {
+			log.Printf("no thumbnail for %s: %v", t.Remote, terr)
+		}
+	}
 	m.mu.Lock()
 	t.cancel, t.Speed = nil, 0
-	if t.State == StateRunning { // not paused or canceled meanwhile
+	// A file that is stored is done, also when the job was paused or canceled
+	// while its thumbnail was made: sent again, it would be there twice.
+	if t.State == StateRunning || stored && t.State != StateDone {
 		if err != nil && ctx.Err() != nil {
 			t.State = StateQueued // shut down mid-transfer: continue next start
 		} else if err != nil {

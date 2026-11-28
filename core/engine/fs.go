@@ -23,6 +23,7 @@ type Item struct {
 	ModTime time.Time `json:"modTime"`
 
 	id      string
+	md5     string // of the stored file
 	encSize int64
 	// The chunks of a file stored in rclone chunker's way; id is then the
 	// metadata object.
@@ -213,7 +214,7 @@ func (f *FS) list(ctx context.Context, p string, create, fresh bool) (map[string
 		if err != nil || name == "" {
 			continue // not part of the encrypted set
 		}
-		it := &Item{Name: name, Path: path.Join(p, name), IsDir: e.IsDir, ModTime: e.ModTime, id: e.ID, encSize: e.Size}
+		it := &Item{Name: name, Path: path.Join(p, name), IsDir: e.IsDir, ModTime: e.ModTime, id: e.ID, md5: e.MD5, encSize: e.Size}
 		if !e.IsDir {
 			if it.Size, err = crypt.DecryptedSize(e.Size); err != nil {
 				continue

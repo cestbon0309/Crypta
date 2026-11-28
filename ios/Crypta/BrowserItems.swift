@@ -77,11 +77,12 @@ extension Item {
 
 // MARK: - Thumbnails
 
-/// Makes small previews of images. The file is stored encrypted, so the
-/// preview is made on the phone from the decrypted file and kept on disk.
+/// Small previews of images and videos, kept on disk. The server stores one
+/// next to what it uploads; an image without one is fetched and made small
+/// on the phone.
 actor ThumbnailStore {
     static let shared = ThumbnailStore()
-    /// Larger images are not fetched just for a preview.
+    /// Larger images are not fetched just to make a preview.
     static let maxBytes: Int64 = 30 << 20
     private static let pixels = 320
 
@@ -104,7 +105,7 @@ actor ThumbnailStore {
     }
 
     func image(for item: Item, api: API) async -> UIImage? {
-        guard item.kind == .image, item.size <= Self.maxBytes else { return nil }
+        guard item.kind == .image || item.kind == .video else { return nil }
         let key = Self.key(item)
         if let hit = memory.object(forKey: key as NSString) { return hit }
         if let task = loading[key] { return await task.value }
@@ -114,7 +115,14 @@ actor ThumbnailStore {
             if let saved = UIImage(contentsOfFile: file.path) { return saved }
             await self.acquire()
             defer { self.release() }
-            guard !Task.isCancelled, let data = try? await api.data(item.path),
+            guard !Task.isCancelled else { return nil }
+            if let data = try? await api.data(item.path, from: "api/thumb"), let image = UIImage(data: data) {
+                guard self.generation == started else { return nil }
+                try? data.write(to: file, options: .atomic)
+                return image
+            }
+            guard !Task.isCancelled, item.kind == .image, item.size <= Self.maxBytes,
+                  let data = try? await api.data(item.path),
                   let image = Self.downsample(data), self.generation == started else { return nil }
             try? image.jpegData(compressionQuality: 0.8)?.write(to: file, options: .atomic)
             return image
@@ -169,7 +177,7 @@ struct ItemIcon: View {
     @State private var thumbnail: UIImage?
 
     private var wantsThumbnail: Bool {
-        showThumbnails && item.kind == .image && item.size <= ThumbnailStore.maxBytes
+        showThumbnails && (item.kind == .image || item.kind == .video)
     }
 
     var body: some View {
@@ -177,6 +185,12 @@ struct ItemIcon: View {
         ZStack {
             if let thumbnail, wantsThumbnail {
                 Image(uiImage: thumbnail).resizable().scaledToFill()
+                if item.kind == .video {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: size * 0.24))
+                        .foregroundStyle(.white)
+                        .shadow(color: .black.opacity(0.6), radius: 2)
+                }
             } else {
                 shape.fill(Color(.tertiarySystemFill))
                 Image(systemName: item.symbol)

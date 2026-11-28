@@ -21,6 +21,8 @@ type Entry struct {
 	IsDir   bool
 	Size    int64
 	ModTime time.Time
+	// MD5 of the stored bytes, when the remote knows it without reading them.
+	MD5 string
 }
 
 type Remote interface {

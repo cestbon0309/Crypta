@@ -17,7 +17,8 @@ RUN case "${TARGETARCH:-$(go env GOARCH)}" in \
  && tar -xzf /tmp/pikpakcli.tar.gz -C /out pikpakcli
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+# ffmpeg makes the thumbnails of the pictures and videos the server uploads.
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 COPY --from=build /out/ /usr/local/bin/
 VOLUME ["/data", "/downloads"]
 EXPOSE 8080

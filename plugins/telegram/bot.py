@@ -32,6 +32,9 @@ API_DIR = Path(os.environ.get("TELEGRAM_API_DIR", "/var/lib/telegram-bot-api"))
 # Where the core sees that folder, relative to its downloads folder. When set,
 # a fetched file is moved inside the folder instead of copied to the downloads.
 API_SHARE = os.environ.get("TELEGRAM_API_SHARE", "").strip("/")
+# Where each fetched file was moved to: the Bot API server hands the same
+# path to every message that carries the same file.
+moved: dict[Path, Path] = {}
 INTERVAL = 1  # seconds between updates of a progress message
 BAR = 10
 
@@ -220,14 +223,24 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             receiving -= 1
         size, seen["have"], seen["phase"] = tg_file.file_size or size, True, "转存到上传目录"
         local = None
-        if LOCAL_MODE and tg_file.file_path and Path(tg_file.file_path).is_file():
-            source = Path(tg_file.file_path)
+        fetched_to = Path(tg_file.file_path) if LOCAL_MODE and tg_file.file_path else None
+        earlier = moved.get(fetched_to)
+        if fetched_to and not fetched_to.is_file() and earlier and earlier.is_file():
+            # Another message with the same file took it first: share its copy.
+            target_dir = API_DIR / "crypta" / job["id"]
+            target = target_dir / name
+            target_dir.mkdir(parents=True, exist_ok=True)
+            os.link(earlier, target)
+            local = f"{API_SHARE}/{target.relative_to(API_DIR)}"
+        elif fetched_to and fetched_to.is_file():
+            source = fetched_to
             if API_SHARE and source.is_relative_to(API_DIR):
                 target_dir = API_DIR / "crypta" / job["id"]
                 target = target_dir / name
                 target_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     source.rename(target)  # same volume: no copy
+                    moved[source] = target
                     source, local = None, f"{API_SHARE}/{target.relative_to(API_DIR)}"
                 except OSError as e:
                     log.warning("could not move %s, copying it: %s", source, e)

@@ -22,6 +22,7 @@ from telegram import Message, Update
 from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telethon import TelegramClient, errors
+from telethon.tl.functions.messages import GetDiscussionMessageRequest
 
 CORE_URL = os.environ.get("CRYPTA_CORE_URL", "http://core:8080").rstrip("/")
 TOKEN_FILE = os.environ.get("CRYPTA_ADMIN_TOKEN_FILE", "/data/admin-token")
@@ -44,7 +45,8 @@ moved: dict[Path, Path] = {}
 ACCOUNT_API_ID = int(os.environ.get("TELEGRAM_API_ID") or 0)
 ACCOUNT_API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
 SESSIONS = Path(os.environ.get("TELEGRAM_SESSION_DIR", "/sessions"))
-# https://t.me/name/12, https://t.me/c/1234567890/12, with a topic id in between or /s/ in front.
+# https://t.me/name/12, https://t.me/c/1234567890/12, with a topic id in between or /s/ in front;
+# ?comment=34 is a comment under post 12.
 LINK_RE = re.compile(r"^https?://(?:t|telegram)\.me/(?:s/)?(?:c/(\d+)|([A-Za-z]\w{3,31}))/(?:\d+/)?(\d+)(?:\?(\S*))?$")
 accounts: dict[int, TelegramClient] = {}  # by the bot user who logged in
 logins: dict[int, dict] = {}  # logins under way: step, phone, hash
@@ -207,6 +209,9 @@ async def login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
     uid, msg = update.effective_user.id, update.effective_message
+    if update.effective_chat.type != "private":  # a group would read the code and the password
+        await msg.reply_text("登录只能在和我的私聊里进行。")
+        return
     try:
         client = await account(uid)
         if await client.is_user_authorized():
@@ -257,6 +262,9 @@ async def login_step(msg: Message, uid: int) -> None:
             )
             return
         if state["step"] == "code":
+            if not re.search(r"\d", text):
+                await msg.reply_text("发来验证码，数字之间加空格。/cancel 取消。")
+                return
             try:
                 await client.sign_in(state["phone"], re.sub(r"\D", "", text), phone_code_hash=state["hash"])
             except errors.SessionPasswordNeededError:
@@ -293,10 +301,14 @@ async def on_link(msg: Message, context: ContextTypes.DEFAULT_TYPE, uid: int, li
         chat = int(f"-100{link[1]}") if link[1] else link[2]
         number = int(link[3])
         try:
-            first = await client.get_messages(chat, ids=number)
+            await client.get_input_entity(chat)
         except ValueError:  # a private chat this login has not met yet
             await client.get_dialogs()
-            first = await client.get_messages(chat, ids=number)
+        if comment := re.search(r"(?:^|&)comment=(\d+)", link[4] or ""):
+            # The comment is a message of the group where the post is discussed.
+            thread = await client(GetDiscussionMessageRequest(peer=chat, msg_id=number))
+            chat, number = thread.messages[0].peer_id, int(comment[1])
+        first = await client.get_messages(chat, ids=number)
         found = [first] if first else []
         if first and first.grouped_id and "single" not in (link[4] or ""):
             near = await client.get_messages(chat, ids=list(range(max(number - 9, 1), number + 10)))
@@ -345,9 +357,12 @@ async def fetch(client: TelegramClient, m, status: Status, context: ContextTypes
     watcher = context.application.create_task(watch())
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        await client.download_media(m, file=str(target), progress_callback=lambda done, total: seen.update(done=done))
+        # Telethon adds an extension to a name that has none and returns the path it wrote.
+        saved = await client.download_media(m, file=str(target), progress_callback=lambda done, total: seen.update(done=done))
+        if not saved:
+            raise RuntimeError("这条消息的文件下载不了")
         watcher.cancel()
-        job = await core("POST", f"/api/transfers/{job['id']}/ready", {"local": str(target.relative_to(DOWNLOADS)), "deleteSource": True})
+        job = await core("POST", f"/api/transfers/{job['id']}/ready", {"local": str(Path(saved).relative_to(DOWNLOADS)), "deleteSource": True})
     except (Exception, asyncio.CancelledError) as e:
         watcher.cancel()
         shutil.rmtree(target_dir, ignore_errors=True)
@@ -476,7 +491,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not allowed(update):
         return
     uid = update.effective_user.id
-    if uid in logins:
+    if uid in logins and update.effective_chat.type == "private":
         await login_step(msg, uid)
         return
     urls = URL_RE.findall(msg.text or "")

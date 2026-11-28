@@ -3,6 +3,7 @@
 package fakedrive
 
 import (
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,6 +72,7 @@ func (s *Server) meta(f *file) map[string]any {
 	m := map[string]any{"id": f.ID, "name": f.Name, "mimeType": f.Mime, "modifiedTime": f.Mod.UTC().Format(time.RFC3339Nano)}
 	if f.Mime != "application/vnd.google-apps.folder" {
 		m["size"] = strconv.Itoa(len(f.Data))
+		m["md5Checksum"] = fmt.Sprintf("%x", md5.Sum(f.Data))
 	}
 	return m
 }

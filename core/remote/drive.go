@@ -21,7 +21,7 @@ const (
 	folderMime      = "application/vnd.google-apps.folder"
 	defaultAPIBase  = "https://www.googleapis.com"
 	defaultTokenURL = "https://oauth2.googleapis.com/token"
-	listFields      = "nextPageToken,files(id,name,mimeType,size,modifiedTime)"
+	listFields      = "nextPageToken,files(id,name,mimeType,size,modifiedTime,md5Checksum)"
 )
 
 type DriveConfig struct {
@@ -179,13 +179,14 @@ type driveFile struct {
 	MimeType     string   `json:"mimeType,omitempty"`
 	Size         string   `json:"size,omitempty"`
 	ModifiedTime string   `json:"modifiedTime,omitempty"`
+	MD5Checksum  string   `json:"md5Checksum,omitempty"`
 	Parents      []string `json:"parents,omitempty"`
 }
 
 func (f driveFile) entry() Entry {
 	size, _ := strconv.ParseInt(f.Size, 10, 64)
 	mt, _ := time.Parse(time.RFC3339, f.ModifiedTime)
-	return Entry{ID: f.ID, Name: f.Name, IsDir: f.MimeType == folderMime, Size: size, ModTime: mt}
+	return Entry{ID: f.ID, Name: f.Name, IsDir: f.MimeType == folderMime, Size: size, ModTime: mt, MD5: f.MD5Checksum}
 }
 
 func (d *Drive) List(ctx context.Context, parentID string) ([]Entry, error) {

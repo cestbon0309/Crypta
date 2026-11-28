@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -127,6 +128,9 @@ func (s *Server) Handler() http.Handler {
 			Fail(w, err)
 			return
 		}
+		if hidden, _, _ := strings.Cut(engine.ThumbDir, "/"); engine.Clean(r.URL.Query().Get("path")) == "" {
+			items = slices.DeleteFunc(items, func(it engine.Item) bool { return it.IsDir && it.Name == hidden })
+		}
 		JSON(w, 200, map[string]any{"items": items})
 	}))
 	mux.HandleFunc("POST /api/mkdir", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
@@ -154,6 +158,27 @@ func (s *Server) Handler() http.Handler {
 		s.done(w, fs.Delete(r.Context(), in.Path))
 	}))
 	mux.HandleFunc("GET /api/file", s.withFS(s.file))
+	// The thumbnail the server stored for a picture or a video; 404 without one.
+	mux.HandleFunc("GET /api/thumb", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
+		it, err := fs.Stat(r.Context(), r.URL.Query().Get("path"))
+		if err == nil {
+			it, err = fs.Thumb(r.Context(), it)
+		}
+		if err != nil {
+			Fail(w, err)
+			return
+		}
+		rc, err := fs.Open(r.Context(), it, 0, -1)
+		if err != nil {
+			Fail(w, err)
+			return
+		}
+		defer rc.Close()
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Length", strconv.FormatInt(it.Size, 10))
+		io.Copy(w, rc)
+	}))
 	mux.HandleFunc("GET /api/media", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		it, err := fs.Stat(r.Context(), r.URL.Query().Get("path"))
 		if err != nil {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net"
 	"net/http"
@@ -269,6 +270,11 @@ func (m *Manager) run(ctx context.Context, t *Transfer, fs *FS) {
 		err = m.pull(ctx, t)
 	default:
 		err = fmt.Errorf("unknown kind %q", t.Kind)
+	}
+	if err == nil && (t.Kind == KindUpload || t.Kind == KindURL) {
+		if terr := m.thumbnail(ctx, t, fs); terr != nil {
+			log.Printf("no thumbnail for %s: %v", t.Remote, terr)
+		}
 	}
 	m.mu.Lock()
 	t.cancel, t.Speed = nil, 0

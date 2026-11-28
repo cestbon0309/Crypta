@@ -53,7 +53,10 @@ logins: dict[int, dict] = {}  # logins under way: step, phone, hash
 INTERVAL = 1  # seconds between updates of a progress message
 BAR = 10
 
-receiving = 0  # files the Bot API server is fetching for us right now
+# job id -> (Telegram's id, size) of the files the Bot API server is fetching for us right now
+waiting: dict[str, tuple[str, int]] = {}
+leftover = 0  # bytes that lay in its temp folder before the first of them
+pace = {"at": 0.0, "bytes": 0, "speed": 0}  # how fast that folder grows
 
 log = logging.getLogger("crypta-telegram")
 
@@ -161,19 +164,36 @@ async def follow(status: Status, job: dict, note: str = "", stage: Path | None =
             return
 
 
-def fetched() -> int | None:
-    """Bytes of the one file the local Bot API server is fetching right now.
-
-    The server answers getFile only once it has the whole file; until then
-    the growing file sits in its temp folder. With several files on the way
-    the folder does not tell them apart, so there is no figure.
-    """
-    if receiving != 1:
-        return None
+def temp_bytes() -> int | None:
     try:
         return sum(f.stat().st_size for f in (API_DIR / TOKEN / "temp").iterdir() if f.is_file())
     except OSError:
         return None
+
+
+def fetched() -> int | None:
+    """Bytes of the files the local Bot API server is fetching right now.
+
+    The server answers getFile only once it has the whole file; until then
+    the growing file sits in its temp folder. With several files on the way
+    the folder does not tell them apart: the figure is that of all of them.
+    """
+    got = temp_bytes()
+    return None if got is None else max(got - leftover, 0)
+
+
+def together(phase: str, name: str, got: int) -> str:
+    """The progress message while several files are fetched at once."""
+    now = time.monotonic()
+    if now - pace["at"] >= INTERVAL:
+        if pace["at"]:
+            pace["speed"] = int(max(got - pace["bytes"], 0) / (now - pace["at"]))
+        pace["at"], pace["bytes"] = now, got
+    files = dict(waiting.values())
+    total = sum(files.values())
+    lines = progress(phase, name, min(got, total or got), total, pace["speed"]).split("\n")
+    lines.insert(1, f"{len(files)} 个文件同时下载，下面是合计进度")
+    return "\n".join(lines)
 
 
 def allowed(update: Update) -> bool:
@@ -380,7 +400,7 @@ async def fetch(client: TelegramClient, m, status: Status, context: ContextTypes
 
 
 async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global receiving
+    global leftover
     msg = update.effective_message
     if not allowed(update):
         return
@@ -403,18 +423,28 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     target_dir = DOWNLOADS / "telegram" / job["id"]  # message ids repeat across chats
     target = target_dir / name
-    seen = {"phase": "从 Telegram 下载", "have": False, "canceled": False}
-    receiving += 1
-    stale = fetched() or 0  # leftovers of earlier downloads in the temp folder
+    seen = {"phase": "从 Telegram 下载", "have": False, "canceled": False, "done": 0}
+    if not waiting:
+        leftover = temp_bytes() or 0
+        pace.update(at=0.0, bytes=0, speed=0)
+    # The same file sent twice is fetched once.
+    waiting[job["id"]] = (getattr(media, "file_unique_id", None) or job["id"], size)
 
     async def watch() -> None:
         while True:
             got = fetched()
-            done = size if seen["have"] else None if got is None else min(max(got - stale, 0), size or got)
+            shared = not seen["have"] and len(dict(waiting.values())) > 1  # this file's own share is not known
+            done = size if seen["have"] else None if got is None or shared else min(got, size or got)
+            if done is not None:
+                seen["done"] = done
             try:
-                cur = await core("POST", f"/api/transfers/{job['id']}/progress", {"done": done or 0, "size": size})
+                # The app keeps the last figure this file had of its own.
+                cur = await core("POST", f"/api/transfers/{job['id']}/progress", {"done": seen["done"], "size": size})
                 seen["canceled"] = cur["state"] == "canceled"
-                await status.show(progress(seen["phase"], name, done, size, cur.get("speed", 0)))
+                if shared and got is not None:
+                    await status.show(together(seen["phase"], name, got))
+                else:
+                    await status.show(progress(seen["phase"], name, done, size, cur.get("speed", 0)))
             except Exception as e:
                 log.warning("progress not reported: %s", e)
             await asyncio.sleep(INTERVAL)
@@ -426,7 +456,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # A local Bot API server answers only after it has fetched the whole file.
             tg_file = await media.get_file(read_timeout=3600)
         finally:
-            receiving -= 1
+            waiting.pop(job["id"], None)
         size, seen["have"], seen["phase"] = tg_file.file_size or size, True, "转存到上传目录"
         local = None
         fetched_to = Path(tg_file.file_path) if LOCAL_MODE and tg_file.file_path else None

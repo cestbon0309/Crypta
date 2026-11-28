@@ -53,7 +53,8 @@ logins: dict[int, dict] = {}  # logins under way: step, phone, hash
 INTERVAL = 1  # seconds between updates of a progress message
 BAR = 10
 
-waiting: dict[str, int] = {}  # job id -> size of the files the Bot API server is fetching for us right now
+# job id -> (Telegram's id, size) of the files the Bot API server is fetching for us right now
+waiting: dict[str, tuple[str, int]] = {}
 leftover = 0  # bytes that lay in its temp folder before the first of them
 pace = {"at": 0.0, "bytes": 0, "speed": 0}  # how fast that folder grows
 
@@ -188,9 +189,10 @@ def together(phase: str, name: str, got: int) -> str:
         if pace["at"]:
             pace["speed"] = int(max(got - pace["bytes"], 0) / (now - pace["at"]))
         pace["at"], pace["bytes"] = now, got
-    total = sum(waiting.values())
+    files = dict(waiting.values())
+    total = sum(files.values())
     lines = progress(phase, name, min(got, total or got), total, pace["speed"]).split("\n")
-    lines.insert(1, f"{len(waiting)} 个文件同时下载，下面是合计进度")
+    lines.insert(1, f"{len(files)} 个文件同时下载，下面是合计进度")
     return "\n".join(lines)
 
 
@@ -425,12 +427,13 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not waiting:
         leftover = temp_bytes() or 0
         pace.update(at=0.0, bytes=0, speed=0)
-    waiting[job["id"]] = size
+    # The same file sent twice is fetched once.
+    waiting[job["id"]] = (getattr(media, "file_unique_id", None) or job["id"], size)
 
     async def watch() -> None:
         while True:
             got = fetched()
-            shared = not seen["have"] and len(waiting) > 1  # this file's own share is not known
+            shared = not seen["have"] and len(dict(waiting.values())) > 1  # this file's own share is not known
             done = size if seen["have"] else None if got is None or shared else min(got, size or got)
             if done is not None:
                 seen["done"] = done

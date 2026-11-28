@@ -95,7 +95,7 @@ docker compose exec core crypta pair          # 显示二维码和配对码
 - 已有反向代理的话不用 `--profile https`，把代理指到 `127.0.0.1:8080`。
 - PikPak：`.env` 填 `PIKPAK_USERNAME` 和 `PIKPAK_PASSWORD`（密码用单引号括起来）后重启，离线下载的链接一栏就可以填 `pikpak:/网盘路径`，文件或文件夹都行；服务器先把它下载到本机再加密上传，所以磁盘要放得下。
 - Telegram 机器人：`.env` 填 `TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_ALLOWED_USERS`（给机器人发 `/start` 能看到自己的数字 ID），然后 `docker compose --profile telegram up -d`。机器人收到文件后回一条进度消息，下载和加密上传期间每秒更新一次；同一个任务也出现在手机 App「传输 → 下载」和进度网页里，上传完成后服务器上的文件自动删除。官方 Bot API 只能下载 20 MB 以内的文件；要到 2 GB，在 [my.telegram.org](https://my.telegram.org) 申请 api id 和 hash，`.env` 填 `TELEGRAM_API_ID`、`TELEGRAM_API_HASH`、`TELEGRAM_API_BASE=http://telegram-bot-api:8081`、`TELEGRAM_LOCAL_MODE=1`，启动时再加 `--profile telegram-bot-api`。不能转发给机器人的消息可以发消息链接（`https://t.me/频道/123`、`https://t.me/c/…/123`）：先在机器人里 `/login`，按提示发手机号、验证码（数字之间加空格，原样发出的验证码会被 Telegram 作废）和两步验证密码，机器人就用你自己的账号取出消息里的文件，相册取整组；`/logout` 退出。这需要 `.env` 里有 `TELEGRAM_API_ID` 和 `TELEGRAM_API_HASH`，登录信息存在 `telegram-sessions` 卷里，登录的账号能读到你能读到的所有聊天。
-- 缩略图：服务器上传图片或视频时（离线下载、PikPak、Telegram），趁文件还在本机用 ffmpeg 生成一张小图（长边 320 像素；视频取时长 30% 处的一帧），加密后存进网盘根下的 `.crypta/thumbs`，文件名是「Drive 文件 ID.MD5.原文件名.jpg」。App 的列表直接显示它，不用为缩略图读原文件；这个文件夹在 App 里不显示。
+- 缩略图：服务器上传图片或视频时（离线下载、PikPak、Telegram），趁文件还在本机用 ffmpeg 生成一张小图（长边 320 像素；视频取时长 30% 处的一帧），加密后存进网盘根下的 `.crypta/thumbs`，文件名是「Drive 文件 ID.MD5.原文件名.jpg」。App 的列表直接显示它，不用为缩略图读原文件；这个文件夹在 App 里不显示。其他文件（以前存的、手机上传的）按需生成：App 的列表里出现没有缩略图的图片或视频时，会告诉配对的服务器，服务器在后台一个一个做，视频只读取索引和那一帧附近的数据；没有定时扫描。
 - 管理设备：`crypta devices`、`crypta revoke <id>`。
 
 服务器保存着 Drive 授权和加密密码（它要替你加密上传），配对时会通过 HTTPS 把这份配置交给手机，所以请务必用 HTTPS，并保管好服务器。

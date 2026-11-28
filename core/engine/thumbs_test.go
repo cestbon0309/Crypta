@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,5 +183,158 @@ func TestPauseDuringThumbnail(t *testing.T) {
 	}
 	if list, _ := fs.List(ctx, "", true); len(list) != 1 || list[0].Name != "a.png" {
 		t.Fatalf("stored: %+v", list)
+	}
+}
+
+// counting counts the bytes read from the remote.
+type counting struct {
+	remote.Remote
+	read atomic.Int64
+}
+
+type countedBody struct {
+	io.ReadCloser
+	n *atomic.Int64
+}
+
+func (c countedBody) Read(b []byte) (int, error) {
+	n, err := c.ReadCloser.Read(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *counting) Open(ctx context.Context, id string, offset, length int64) (io.ReadCloser, error) {
+	rc, err := c.Remote.Open(ctx, id, offset, length)
+	if err != nil {
+		return nil, err
+	}
+	return countedBody{rc, &c.read}, nil
+}
+
+// Files stored without a thumbnail get one when it is asked for, and of a
+// video only a part is read for it.
+func TestRequestThumbs(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("no ffmpeg")
+	}
+	srv := fakedrive.New()
+	defer srv.Close()
+	cfg := &Config{Backend: "drive", Path: "enc", Crypt: crypt.Options{Password: "pw"},
+		Drive: remote.DriveConfig{ClientID: "id", Token: json.RawMessage(`{"refresh_token":"rt"}`), APIBase: srv.URL, TokenURL: srv.URL + "/token"}}
+	dir := t.TempDir()
+	files := filepath.Join(dir, "files")
+	os.MkdirAll(files, 0o755)
+	for _, args := range [][]string{
+		// Black for the first tenth, then a moving pattern; the index is at the end of the file.
+		{"-f", "lavfi", "-i", "color=black:s=1280x720:d=6", "-f", "lavfi", "-i", "testsrc2=s=1280x720:d=54", "-filter_complex", "[0][1]concat=n=2", "-pix_fmt", "yuv420p", "-b:v", "3M", "long.mp4"},
+		{"-f", "lavfi", "-i", "color=blue:s=1200x800", "-frames:v", "1", "photo.png"},
+	} {
+		cmd := exec.Command(ffmpeg, append([]string{"-v", "error"}, args...)...)
+		cmd.Dir = files
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	os.WriteFile(filepath.Join(files, "broken.mp4"), []byte("not a video"), 0o644)
+	os.WriteFile(filepath.Join(files, "notes.txt"), []byte("hello"), 0o644)
+	fs, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.ChunkSize = 1024 * 1024 // the video is stored in chunks
+	count := &counting{Remote: fs.R}
+	fs.R = count
+	m, err := NewManager(filepath.Join(dir, "state"), files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.SetFS(fs)
+	go m.Run(ctx)
+	// Stored as a phone stores them: no ffmpeg there.
+	path := os.Getenv("PATH")
+	os.Setenv("PATH", t.TempDir())
+	defer os.Setenv("PATH", path)
+	names := []string{"long.mp4", "photo.png", "broken.mp4", "notes.txt"}
+	for _, name := range names {
+		tr, err := m.Add(Transfer{Kind: KindUpload, Local: name, Remote: "media"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, m, tr.ID, StateDone)
+	}
+	all := []string{"media/long.mp4", "/media/photo.png", "media/broken.mp4", "media/notes.txt", "media/none.mp4", "media"}
+	if n := m.RequestThumbs(ctx, fs, all); n != 0 {
+		t.Fatalf("%d queued without ffmpeg", n)
+	}
+	os.Setenv("PATH", path)
+	video, _ := fs.Stat(ctx, "media/long.mp4")
+	if video == nil || len(video.parts) < 3 {
+		t.Fatalf("the video is not chunked: %+v", video)
+	}
+	count.read.Store(0)
+	if n := m.RequestThumbs(ctx, fs, all); n != 3 {
+		t.Fatalf("%d queued", n)
+	}
+	if n := m.RequestThumbs(ctx, fs, all); n != 0 {
+		t.Fatalf("%d queued twice", n)
+	}
+	idle := func() {
+		t.Helper()
+		for i := 0; ; i++ {
+			m.thumbMu.Lock()
+			busy := m.thumbBusy
+			m.thumbMu.Unlock()
+			if !busy {
+				return
+			}
+			if i > 3000 {
+				t.Fatal("thumbnails are still being made")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	idle()
+	read := count.read.Load()
+	t.Logf("read %d of %d bytes", read, video.Size)
+	if read > video.Size/2 {
+		t.Fatalf("read %d bytes for the thumbnail of a %d byte video", read, video.Size)
+	}
+	look := func(p string) (w, h int, r, g, b uint32) {
+		t.Helper()
+		it, err := fs.Stat(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		th, err := fs.Thumb(ctx, it)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		rc, err := fs.Open(ctx, th, 0, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rc.Close()
+		img, err := jpeg.Decode(rc)
+		if err != nil {
+			t.Fatalf("%s: %v", p, err)
+		}
+		r, g, b, _ = img.At(10, 10).RGBA()
+		return img.Bounds().Dx(), img.Bounds().Dy(), r >> 8, g >> 8, b >> 8
+	}
+	if w, h, r, g, b := look("media/long.mp4"); w != 320 || h != 180 || r+g+b < 60 {
+		t.Fatalf("video thumbnail %dx%d, colour %d %d %d", w, h, r, g, b)
+	}
+	if w, h, _, _, b := look("media/photo.png"); w != 320 || h != 213 || b < 150 {
+		t.Fatalf("picture thumbnail %dx%d, blue %d", w, h, b)
+	}
+	// The broken video gave nothing and is not tried again; the rest have theirs.
+	if n := m.RequestThumbs(ctx, fs, all); n != 0 {
+		t.Fatalf("%d queued again", n)
+	}
+	if list, _ := fs.List(ctx, ThumbDir, true); len(list) != 2 {
+		t.Fatalf("%d thumbnails stored", len(list))
 	}
 }

@@ -199,7 +199,16 @@ final class Player: NSObject, ObservableObject, VLCMediaPlayerDelegate {
         vlc.play()
     }
 
-    func toggle() { vlc.isPlaying ? vlc.pause() : vlc.play() }
+    func toggle() {
+        if vlc.isPlaying {
+            vlc.pause()
+            return
+        }
+        // VLC ignores play() on a media that has played to its end until it
+        // is stopped. It may report the end as .stopped.
+        if vlc.state == .ended || vlc.state == .stopped { vlc.stop() }
+        vlc.play()
+    }
     func skip(_ seconds: Int32) { seconds > 0 ? vlc.jumpForward(seconds) : vlc.jumpBackward(-seconds) }
     func seek(to p: Double) {
         if vlc.isPlaying {

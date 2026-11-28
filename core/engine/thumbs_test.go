@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cestbon0309/crypta/core/crypt"
 	"github.com/cestbon0309/crypta/core/internal/fakedrive"
@@ -132,5 +133,54 @@ func TestNoThumbDir(t *testing.T) {
 	}
 	if _, err := fs.Thumb(context.Background(), &Item{id: "x"}); !errors.Is(err, remote.ErrNotFound) {
 		t.Fatal(err)
+	}
+}
+
+// A job paused while its thumbnail is made is done: the file is stored.
+func TestPauseDuringThumbnail(t *testing.T) {
+	bin := t.TempDir()
+	started := filepath.Join(bin, "started")
+	os.WriteFile(filepath.Join(bin, "ffmpeg"), []byte("#!/bin/sh\ntouch "+started+"\nsleep 30\n"), 0o755)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	srv := fakedrive.New()
+	defer srv.Close()
+	cfg := &Config{Backend: "drive", Path: "enc", Crypt: crypt.Options{Password: "pw"},
+		Drive: remote.DriveConfig{ClientID: "id", Token: json.RawMessage(`{"refresh_token":"rt"}`), APIBase: srv.URL, TokenURL: srv.URL + "/token"}}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.png"), []byte("picture"), 0o644)
+	fs, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManager(filepath.Join(dir, "state"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.SetFS(fs)
+	go m.Run(ctx)
+	tr, err := m.Add(Transfer{Kind: KindUpload, Local: "a.png", Remote: "", DeleteSource: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; ; i++ {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if i > 500 {
+			t.Fatal("ffmpeg was not started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := m.Act(tr.ID, "pause"); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, m, tr.ID, StateDone)
+	if _, err := os.Stat(filepath.Join(dir, "a.png")); !os.IsNotExist(err) {
+		t.Fatalf("the source is still there: %v", err)
+	}
+	if list, _ := fs.List(ctx, "", true); len(list) != 1 || list[0].Name != "a.png" {
+		t.Fatalf("stored: %+v", list)
 	}
 }

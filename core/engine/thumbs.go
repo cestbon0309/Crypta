@@ -86,8 +86,10 @@ func frame(ctx context.Context, file, name string) ([]byte, error) {
 	var out, msg bytes.Buffer
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	cmd.Stdout, cmd.Stderr = &out, &msg
+	cmd.WaitDelay = time.Second
+	err = cmd.Run()
 	said, _, _ := strings.Cut(strings.TrimSpace(msg.String()), "\n")
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("ffmpeg: %w: %s", err, said)
 	}
 	if out.Len() == 0 {

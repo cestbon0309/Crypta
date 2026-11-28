@@ -331,7 +331,8 @@ func (m *Manager) makeThumbs(fs *FS) {
 		cancel()
 		if err != nil {
 			// It stays in thumbSeen: a file that gives no picture is not tried again.
-			log.Printf("no thumbnail for %s: %v", it.Path, err)
+			fid := thumbLogID(it.id)
+			log.Printf("file=%s thumbnail failed err=%s", fid, redactItemError(it, fid, err))
 			continue
 		}
 		m.thumbMu.Lock()

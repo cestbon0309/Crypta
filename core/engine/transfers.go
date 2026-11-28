@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"crypto/md5"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -256,12 +255,14 @@ func (m *Manager) schedule(ctx context.Context) {
 		t.State, t.Error = StateRunning, ""
 		tctx, cancel := context.WithCancel(ctx)
 		t.cancel = cancel
+		log.Printf("file=%s transfer started kind=%s", t.ID, t.Kind)
 		go m.run(tctx, t, m.fs)
 	}
 	m.saveLocked(true)
 }
 
 func (m *Manager) run(ctx context.Context, t *Transfer, fs *FS) {
+	started := time.Now()
 	var err error
 	switch t.Kind {
 	case KindUpload:
@@ -280,16 +281,21 @@ func (m *Manager) run(ctx context.Context, t *Transfer, fs *FS) {
 	stored := err == nil && (t.Kind == KindUpload || t.Kind == KindURL)
 	if stored {
 		if terr := m.thumbnail(ctx, t, fs); terr != nil {
-			log.Printf("no thumbnail for %s: %v", t.Remote, terr)
+			m.mu.Lock()
+			snap := *t
+			m.mu.Unlock()
+			log.Printf("file=%s thumbnail failed err=%s", snap.ID, redactTransferError(m, &snap, terr))
 		}
 	}
 	m.mu.Lock()
 	t.cancel, t.Speed = nil, 0
 	// A file that is stored is done, also when the job was paused or canceled
 	// while its thumbnail was made: sent again, it would be there twice.
+	requeued := false
 	if t.State == StateRunning || stored && t.State != StateDone {
 		if err != nil && ctx.Err() != nil {
 			t.State = StateQueued // shut down mid-transfer: continue next start
+			requeued = true
 		} else if err != nil {
 			t.State, t.Error = StateFailed, err.Error()
 		} else {
@@ -300,7 +306,20 @@ func (m *Manager) run(ctx context.Context, t *Transfer, fs *FS) {
 		m.cleanup(t)
 	}
 	m.saveLocked(true)
+	snap := *t
 	m.mu.Unlock()
+	switch {
+	case requeued:
+		log.Printf("file=%s transfer requeued kind=%s reason=shutdown", snap.ID, snap.Kind)
+	case snap.State == StateDone:
+		log.Printf("file=%s transfer done kind=%s size=%d duration=%s", snap.ID, snap.Kind, snap.Size, time.Since(started).Round(time.Millisecond))
+	case snap.State == StateFailed:
+		phase := snap.Phase
+		if phase == "" {
+			phase = snap.Kind
+		}
+		log.Printf("file=%s transfer failed kind=%s phase=%s err=%s", snap.ID, snap.Kind, phase, redactTransferError(m, &snap, err))
+	}
 	m.kick()
 }
 
@@ -1077,9 +1096,7 @@ func (m *Manager) fetch(ctx context.Context, t *Transfer) error {
 // ---- public queue operations ----
 
 func newID() string {
-	b := make([]byte, 8)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	return newUUID()
 }
 
 // Add queues a transfer. For uploads Remote is the destination folder and
@@ -1147,6 +1164,7 @@ func (m *Manager) Add(t Transfer) (*Transfer, error) {
 	m.saveLocked(true)
 	cp := t
 	m.mu.Unlock()
+	log.Printf("file=%s transfer queued kind=%s size=%d", cp.ID, cp.Kind, cp.Size)
 	m.kick()
 	return &cp, nil
 }
@@ -1162,10 +1180,11 @@ func (m *Manager) AddExternal(name, remoteDir string, size int64) (*Transfer, er
 	t := &Transfer{ID: newID(), Kind: KindUpload, State: StateRunning, Phase: "downloading", External: true,
 		Name: name, Remote: path.Join(Clean(remoteDir), name), Size: max(size, 0), CreatedAt: time.Now()}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.items[t.ID] = t
 	m.saveLocked(true)
 	cp := *t
+	m.mu.Unlock()
+	log.Printf("file=%s transfer created kind=%s external=true size=%d", cp.ID, cp.Kind, cp.Size)
 	return &cp, nil
 }
 
@@ -1230,6 +1249,7 @@ func (m *Manager) Ready(id, local string, deleteSource bool) (*Transfer, error) 
 	t.Local, t.Source, t.Size, t.DeleteSource = local, local, fi.Size(), deleteSource
 	m.saveLocked(true)
 	cp := *t
+	log.Printf("file=%s transfer ready kind=%s size=%d", cp.ID, cp.Kind, cp.Size)
 	go m.kick()
 	return &cp, nil
 }
@@ -1237,14 +1257,21 @@ func (m *Manager) Ready(id, local string, deleteSource bool) (*Transfer, error) 
 // Fail ends an external job whose file could not be fetched.
 func (m *Manager) Fail(id, msg string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	t, err := m.external(id)
 	if err != nil {
+		m.mu.Unlock()
 		return err
 	}
+	var snap *Transfer
 	if t.State == StateRunning {
 		t.State, t.Error, t.Speed = StateFailed, msg, 0
 		m.saveLocked(true)
+		cp := *t
+		snap = &cp
+	}
+	m.mu.Unlock()
+	if snap != nil {
+		log.Printf("file=%s transfer failed kind=%s external=true err=%s", snap.ID, snap.Kind, redactTransferError(m, snap, errors.New(msg)))
 	}
 	return nil
 }
@@ -1387,7 +1414,9 @@ func (m *Manager) Act(id, action string) error {
 	if t.cancel != nil && t.State != StateRunning {
 		t.cancel()
 	}
+	state := t.State
 	m.saveLocked(true)
+	log.Printf("file=%s transfer action=%s state=%s", id, action, state)
 	go m.kick()
 	return nil
 }

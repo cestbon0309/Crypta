@@ -10,12 +10,16 @@ has to do as well.
 """
 
 import asyncio
+from collections import OrderedDict
 import logging
 import os
 import re
 import shutil
+import threading
 import time
+import uuid
 from pathlib import Path
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from telegram import Message, Update
@@ -60,6 +64,114 @@ pace = {"at": 0.0, "bytes": 0, "speed": 0}  # how fast that folder grows
 
 log = logging.getLogger("crypta-telegram")
 
+_REDACT_LOCK = threading.Lock()
+_SENSITIVE: OrderedDict[str, str] = OrderedDict()
+_SENSITIVE_LIMIT = 2048
+
+_RE_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+_RE_BOT_TOKEN = re.compile(r"\bbot\d+:[A-Za-z0-9_-]{20,}\b")
+_RE_RAW_TOKEN = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+_RE_URL = re.compile(r"https?://[^\s\"'<>]+")
+_RE_PIKPAK = re.compile(r"pikpak:[^\s\"'<>]+")
+_RE_BOT_API_PATH = re.compile(r"/var/lib/telegram-bot-api/[^\s\"':,)\]]+")
+_RE_DOWNLOAD_PATH = re.compile(
+    r"/downloads/(?!telegram/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/file\b)[^\s\"':,)\]]+",
+    re.IGNORECASE,
+)
+_RE_WIN_PATH = re.compile(r"[A-Za-z]:\\[^\s\"':,)\]]+")
+
+
+def _add_sensitive(token: str, replacement: str) -> None:
+    token = token.strip()
+    if not token or token in (".", "/", "\\") or token == replacement or _RE_UUID.match(token):
+        return
+    with _REDACT_LOCK:
+        _SENSITIVE[token] = replacement
+        _SENSITIVE.move_to_end(token)
+        while len(_SENSITIVE) > _SENSITIVE_LIMIT:
+            _SENSITIVE.popitem(last=False)
+
+
+def register_sensitive(value: str | Path | None, replacement: str) -> None:
+    """Remember a filename, path, or URL so log output replaces it with a UUID."""
+    if value is None:
+        return
+    raw = str(value).strip()
+    if not raw:
+        return
+    _add_sensitive(raw, replacement)
+    slashed = raw.replace("\\", "/")
+    _add_sensitive(slashed, replacement)
+    if raw.startswith(("http://", "https://")):
+        parsed = urlparse(raw)
+        if parsed.path:
+            _add_sensitive(parsed.path, replacement)
+            pbase = parsed.path.rstrip("/").rsplit("/", 1)[-1]
+            if pbase:
+                _add_sensitive(pbase, replacement)
+            punesc = unquote(parsed.path)
+            if punesc != parsed.path:
+                _add_sensitive(punesc, replacement)
+                pubase = punesc.rstrip("/").rsplit("/", 1)[-1]
+                if pubase:
+                    _add_sensitive(pubase, replacement)
+    base = slashed.rstrip("/").rsplit("/", 1)[-1]
+    if base:
+        _add_sensitive(base, replacement)
+    unesc = unquote(raw)
+    if unesc != raw:
+        _add_sensitive(unesc, replacement)
+        unesc_base = unesc.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        if unesc_base:
+            _add_sensitive(unesc_base, replacement)
+    esc = quote(raw, safe="/:@")
+    if esc != raw:
+        _add_sensitive(esc, replacement)
+
+
+def sanitize_log_text(text: str) -> str:
+    """Scrub filenames, local paths, URLs, and Telegram secrets from log text."""
+    if not text:
+        return text
+    if TOKEN:
+        text = text.replace(TOKEN, "<bot-token>")
+    if ACCOUNT_API_HASH:
+        text = text.replace(ACCOUNT_API_HASH, "<api-hash>")
+    with _REDACT_LOCK:
+        items = list(_SENSITIVE.items())
+    items.sort(key=lambda kv: len(kv[0]), reverse=True)
+    for tok, repl in items:
+        if len(tok) >= 4 or "/" in tok or "\\" in tok:
+            text = text.replace(tok, repl)
+        else:
+            text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(tok)}(?![A-Za-z0-9_])", repl, text)
+    text = _RE_BOT_TOKEN.sub("bot<redacted>", text)
+    text = _RE_RAW_TOKEN.sub("<token>", text)
+    text = _RE_URL.sub("<url>", text)
+    text = _RE_PIKPAK.sub("pikpak:<redacted>", text)
+    text = _RE_BOT_API_PATH.sub("<bot-api-path>", text)
+    text = _RE_DOWNLOAD_PATH.sub("<download-path>", text)
+    text = _RE_WIN_PATH.sub("<path>", text)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    """Formatter that redacts both log messages and full exception tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return sanitize_log_text(super().format(record))
+
+
+def configure_logging() -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(RedactingFormatter("%(asctime)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+    for noisy in ("httpx", "httpcore", "telethon", "telegram"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
 def core_token() -> str:
     token = os.environ.get("CRYPTA_ADMIN_TOKEN")
@@ -103,8 +215,8 @@ def progress(phase: str, name: str, done: int | None, size: int, speed: int = 0)
 class Status:
     """The bot's one reply to a message, edited in place as the job moves on."""
 
-    def __init__(self, message: Message) -> None:
-        self.message, self.text, self.quiet_until = message, message.text, 0.0
+    def __init__(self, message: Message, file_id: str | None = None) -> None:
+        self.message, self.text, self.quiet_until, self.file_id = message, message.text, 0.0, file_id
 
     async def show(self, text: str, final: bool = False) -> None:
         if text == self.text:
@@ -122,7 +234,10 @@ class Status:
             if final:
                 await self.show(text, final=True)
         except Exception as e:
-            log.warning("could not update the progress message: %s", e)
+            if self.file_id:
+                log.warning("file=%s could not update the progress message: %s", self.file_id, e)
+            else:
+                log.warning("could not update the progress message: %s", e)
 
 
 async def follow(status: Status, job: dict, note: str = "", stage: Path | None = None) -> None:
@@ -131,23 +246,31 @@ async def follow(status: Status, job: dict, note: str = "", stage: Path | None =
     stage is the folder the job's file was put in; the core deletes the
     file after the upload and the folder goes once it is empty.
     """
+    file_id = job["id"]
+    status.file_id = file_id
     phases = {"downloading": "下载到服务器", "uploading": "加密上传"}
     while True:
         await asyncio.sleep(INTERVAL)
         try:
             jobs = (await core("GET", "/api/transfers"))["transfers"]
         except Exception as e:  # core restarting: try again
-            log.warning("core unreachable: %s", e)
+            log.warning("file=%s core unreachable: %s", file_id, e)
             continue
-        cur = next((j for j in jobs if j["id"] == job["id"]), None)
+        cur = next((j for j in jobs if j["id"] == file_id), None)
         if cur is None:
             return
         name = cur.get("name") or job.get("name") or "文件"
+        register_sensitive(name, file_id)
+        if cur.get("remote"):
+            register_sensitive(cur["remote"], file_id)
         if cur["state"] == "done":
+            log.info("file=%s transfer completed state=done", file_id)
             await status.show(f"✅ 已加密保存：/{cur['remote']}{note}", final=True)
         elif cur["state"] == "failed":
+            log.warning("file=%s transfer completed state=failed", file_id)
             await status.show(f"❌ {name} 失败：{cur.get('error', '')}{note}", final=True)
         elif cur["state"] == "canceled":
+            log.info("file=%s transfer completed state=canceled", file_id)
             await status.show(f"已取消：{name}{note}", final=True)
         elif cur["state"] == "paused":
             await status.show(f"已暂停：{name}")
@@ -312,6 +435,8 @@ async def login_step(msg: Message, uid: int) -> None:
 
 async def on_link(msg: Message, context: ContextTypes.DEFAULT_TYPE, uid: int, link: re.Match) -> None:
     """Fetch the file of the linked message, or every file of its album."""
+    link_id = str(uuid.uuid4())
+    register_sensitive(link[0], link_id)
     status = Status(await msg.reply_text(f"正在读取消息：{link[0]}"))
     try:
         client = await account(uid)
@@ -335,12 +460,14 @@ async def on_link(msg: Message, context: ContextTypes.DEFAULT_TYPE, uid: int, li
             found = [m for m in near if m and m.grouped_id == first.grouped_id]
         found = [m for m in found if m.file]
     except Exception as e:
-        log.exception("link failed")
+        log.exception("link=%s read failed", link_id)
         await status.show(f"❌ 读取失败：{e}", final=True)
         return
     if not found:
+        log.info("link=%s resolved files=0", link_id)
         await status.show("找不到这条消息，或者里面没有文件（登录的账号要能看到它）。", final=True)
         return
+    log.info("link=%s resolved files=%d", link_id, len(found))
     for i, m in enumerate(found):
         if i:
             status = Status(await msg.reply_text("正在读取消息"))
@@ -354,44 +481,55 @@ async def fetch(client: TelegramClient, m, status: Status, context: ContextTypes
     try:
         job = await core("POST", "/api/transfers", {"kind": "upload", "pending": True, "name": name, "remote": REMOTE_DIR, "size": size})
     except Exception as e:
+        fallback_id = str(uuid.uuid4())
+        register_sensitive(name, fallback_id)
+        log.warning("file=%s failed to register telegram-link transfer: %s", fallback_id, e)
         await status.show(f"❌ {name} 失败：{e}", final=True)
         return
-    target_dir = DOWNLOADS / "telegram" / job["id"]
-    target = target_dir / name
+    file_id = job["id"]
+    status.file_id = file_id
+    register_sensitive(name, file_id)
+    log.info("file=%s received kind=telegram-link size=%d", file_id, size)
+    # Stage under an opaque UUID path so local errors and ffmpeg logs never leak the filename.
+    target_dir = DOWNLOADS / "telegram" / file_id
+    target = target_dir / "file"
     seen = {"done": 0, "canceled": False}
     download = asyncio.current_task()
 
     async def watch() -> None:
         while True:
             try:
-                cur = await core("POST", f"/api/transfers/{job['id']}/progress", {"done": seen["done"], "size": size})
+                cur = await core("POST", f"/api/transfers/{file_id}/progress", {"done": seen["done"], "size": size})
                 await status.show(progress("从 Telegram 下载", name, seen["done"], size, cur.get("speed", 0)))
                 if cur["state"] == "canceled":
                     seen["canceled"] = True
                     download.cancel()
                     return
             except Exception as e:
-                log.warning("progress not reported: %s", e)
+                log.warning("file=%s progress not reported: %s", file_id, e)
             await asyncio.sleep(INTERVAL)
 
     watcher = context.application.create_task(watch())
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
-        # Telethon adds an extension to a name that has none and returns the path it wrote.
-        saved = await client.download_media(m, file=str(target), progress_callback=lambda done, total: seen.update(done=done))
+        # Writing to an open file object prevents Telethon from appending extensions or renaming.
+        with target.open("wb") as fp:
+            saved = await client.download_media(m, file=fp, progress_callback=lambda done, total: seen.update(done=done))
         if not saved:
             raise RuntimeError("这条消息的文件下载不了")
         watcher.cancel()
-        job = await core("POST", f"/api/transfers/{job['id']}/ready", {"local": str(Path(saved).relative_to(DOWNLOADS)), "deleteSource": True})
+        job = await core("POST", f"/api/transfers/{file_id}/ready", {"local": str(target.relative_to(DOWNLOADS)), "deleteSource": True})
+        log.info("file=%s ready kind=telegram-link size=%d", file_id, job.get("size", size))
     except (Exception, asyncio.CancelledError) as e:
         watcher.cancel()
         shutil.rmtree(target_dir, ignore_errors=True)
         if seen["canceled"]:
+            log.info("file=%s canceled kind=telegram-link", file_id)
             await status.show(f"已取消：{name}", final=True)
             return
-        log.exception("link download failed")
+        log.exception("file=%s link download failed", file_id)
         try:
-            await core("POST", f"/api/transfers/{job['id']}/fail", {"error": str(e)})
+            await core("POST", f"/api/transfers/{file_id}/fail", {"error": str(e)})
         except Exception:
             pass
         await status.show(f"❌ {name} 失败：{e}", final=True)
@@ -419,16 +557,24 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Listed in the core right away, so the app shows the download too.
         job = await core("POST", "/api/transfers", {"kind": "upload", "pending": True, "name": name, "remote": REMOTE_DIR, "size": size})
     except Exception as e:
+        fallback_id = str(uuid.uuid4())
+        register_sensitive(name, fallback_id)
+        log.warning("file=%s failed to register media transfer: %s", fallback_id, e)
         await status.show(f"❌ {name} 失败：{e}", final=True)
         return
-    target_dir = DOWNLOADS / "telegram" / job["id"]  # message ids repeat across chats
-    target = target_dir / name
+    file_id = job["id"]
+    status.file_id = file_id
+    register_sensitive(name, file_id)
+    log.info("file=%s received kind=media size=%d", file_id, size)
+    # Stage under an opaque UUID path so local errors and ffmpeg logs never leak the filename.
+    target_dir = DOWNLOADS / "telegram" / file_id  # message ids repeat across chats
+    target = target_dir / "file"
     seen = {"phase": "从 Telegram 下载", "have": False, "canceled": False, "done": 0}
     if not waiting:
         leftover = temp_bytes() or 0
         pace.update(at=0.0, bytes=0, speed=0)
     # The same file sent twice is fetched once.
-    waiting[job["id"]] = (getattr(media, "file_unique_id", None) or job["id"], size)
+    waiting[file_id] = (getattr(media, "file_unique_id", None) or file_id, size)
 
     async def watch() -> None:
         while True:
@@ -439,14 +585,14 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 seen["done"] = done
             try:
                 # The app keeps the last figure this file had of its own.
-                cur = await core("POST", f"/api/transfers/{job['id']}/progress", {"done": seen["done"], "size": size})
+                cur = await core("POST", f"/api/transfers/{file_id}/progress", {"done": seen["done"], "size": size})
                 seen["canceled"] = cur["state"] == "canceled"
                 if shared and got is not None:
                     await status.show(together(seen["phase"], name, got))
                 else:
                     await status.show(progress(seen["phase"], name, done, size, cur.get("speed", 0)))
             except Exception as e:
-                log.warning("progress not reported: %s", e)
+                log.warning("file=%s progress not reported: %s", file_id, e)
             await asyncio.sleep(INTERVAL)
 
     watcher = context.application.create_task(watch())
@@ -456,33 +602,35 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # A local Bot API server answers only after it has fetched the whole file.
             tg_file = await media.get_file(read_timeout=3600)
         finally:
-            waiting.pop(job["id"], None)
+            waiting.pop(file_id, None)
         size, seen["have"], seen["phase"] = tg_file.file_size or size, True, "转存到上传目录"
         local = None
         fetched_to = Path(tg_file.file_path) if LOCAL_MODE and tg_file.file_path else None
+        if fetched_to is not None:
+            register_sensitive(fetched_to, file_id)
         earlier = moved.get(fetched_to)
         if fetched_to and not fetched_to.is_file() and earlier and earlier.is_file():
             # Another message with the same file took it first: share its copy.
-            target_dir = API_DIR / "crypta" / job["id"]
-            target = target_dir / name
+            target_dir = API_DIR / "crypta" / file_id
+            target = target_dir / "file"
             target_dir.mkdir(parents=True, exist_ok=True)
             os.link(earlier, target)
             local = f"{API_SHARE}/{target.relative_to(API_DIR)}"
         elif fetched_to and fetched_to.is_file():
             source = fetched_to
             if API_SHARE and source.is_relative_to(API_DIR):
-                target_dir = API_DIR / "crypta" / job["id"]
-                target = target_dir / name
+                target_dir = API_DIR / "crypta" / file_id
+                target = target_dir / "file"
                 target_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     source.rename(target)  # same volume: no copy
                     moved[source] = target
                     source, local = None, f"{API_SHARE}/{target.relative_to(API_DIR)}"
                 except OSError as e:
-                    log.warning("could not move %s, copying it: %s", source, e)
+                    log.warning("file=%s could not move local file, copying instead: %s", file_id, type(e).__name__)
                     shutil.rmtree(target_dir, ignore_errors=True)
-                    target_dir = DOWNLOADS / "telegram" / job["id"]
-                    target = target_dir / name
+                    target_dir = DOWNLOADS / "telegram" / file_id
+                    target = target_dir / "file"
             if local is None:
                 target_dir.mkdir(parents=True, exist_ok=True)
                 await asyncio.to_thread(shutil.copyfile, source, target)
@@ -490,16 +638,18 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             target_dir.mkdir(parents=True, exist_ok=True)
             await tg_file.download_to_drive(custom_path=target, read_timeout=600)
         watcher.cancel()
-        job = await core("POST", f"/api/transfers/{job['id']}/ready", {"local": local or str(target.relative_to(DOWNLOADS)), "deleteSource": True})
+        job = await core("POST", f"/api/transfers/{file_id}/ready", {"local": local or str(target.relative_to(DOWNLOADS)), "deleteSource": True})
+        log.info("file=%s ready kind=media size=%d", file_id, size)
     except Exception as e:
         watcher.cancel()
-        log.exception("media failed")
+        log.exception("file=%s media failed", file_id)
         shutil.rmtree(target_dir, ignore_errors=True)
         if seen["canceled"]:
+            log.info("file=%s canceled kind=media", file_id)
             await status.show(f"已取消：{name}", final=True)
             return
         try:
-            await core("POST", f"/api/transfers/{job['id']}/fail", {"error": str(e)})
+            await core("POST", f"/api/transfers/{file_id}/fail", {"error": str(e)})
         except Exception:
             pass
         hint = "（官方 Bot API 只能下载 20 MB 以内的文件；更大的文件需要自建 Bot API 服务器，见 README）" if "too big" in str(e).lower() else ""
@@ -511,7 +661,7 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 source.unlink()
             except OSError as e:
-                log.warning("could not delete %s: %s", source, e)
+                log.warning("file=%s could not delete local Bot API file: %s", file_id, type(e).__name__)
                 note = "\n⚠️ Bot API 服务器上的原始文件没能删除（它的数据目录对机器人是只读的），请把挂载改成可写。"
     context.application.create_task(follow(status, job, note, target_dir))
 
@@ -532,18 +682,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if link := LINK_RE.match(url):
             await on_link(msg, context, uid, link)
             continue
+        fallback_id = str(uuid.uuid4())
+        register_sensitive(url, fallback_id)
         status = Status(await msg.reply_text(f"已加入离线下载：{url}"))
         try:
             job = await core("POST", "/api/transfers", {"kind": "url", "url": url, "remote": REMOTE_DIR})
         except Exception as e:
+            log.warning("file=%s failed to queue url transfer: %s", fallback_id, e)
             await status.show(f"❌ 失败：{e}", final=True)
             continue
+        file_id = job["id"]
+        status.file_id = file_id
+        register_sensitive(url, file_id)
+        log.info("file=%s queued kind=url", file_id)
         context.application.create_task(follow(status, job))
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    configure_logging()
     builder = Application.builder().token(TOKEN).concurrent_updates(True)
     # A self-hosted Bot API server lifts the 20 MB download limit.
     if base := os.environ.get("TELEGRAM_API_BASE"):

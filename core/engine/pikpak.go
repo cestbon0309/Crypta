@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"path"
@@ -110,12 +111,36 @@ func (m *Manager) pull(ctx context.Context, t *Transfer) error {
 	}
 	for _, f := range files {
 		rel, _ := filepath.Rel(dir, f)
-		if _, err := m.Add(Transfer{Kind: KindUpload, Local: f, Remote: path.Join(t.Remote, path.Dir(filepath.ToSlash(rel))), DeleteSource: true}); err != nil {
+		staged := filepath.Join(dir, newUUID())
+		if err := os.Rename(f, staged); err != nil {
 			return err
 		}
+		pruneEmptyUnder(dir, filepath.Dir(f))
+		child, err := m.Add(Transfer{
+			Kind:         KindUpload,
+			Local:        staged,
+			Name:         filepath.Base(f),
+			Remote:       path.Join(t.Remote, path.Dir(filepath.ToSlash(rel))),
+			DeleteSource: true,
+		})
+		if err != nil {
+			return err
+		}
+		log.Printf("file=%s pikpak queued child=%s", t.ID, child.ID)
 	}
 	m.update(t, func() { t.Size = size })
 	return nil
+}
+
+// pruneEmptyUnder removes empty directories from start up to (but not
+// including) root, cleaning up original PikPak subfolder names right away.
+func pruneEmptyUnder(root, start string) {
+	root = filepath.Clean(root)
+	for dir := filepath.Clean(start); strings.HasPrefix(dir, root+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		if os.Remove(dir) != nil {
+			return
+		}
+	}
 }
 
 // pulled lists the files under dir; partial says that some are unfinished.

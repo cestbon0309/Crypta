@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -55,6 +56,17 @@ const (
 	DefaultParallel = 8
 	MaxParallel     = 16
 )
+
+// DefaultSegments and MaxSegments bound how many ranges of one file are
+// downloaded at once, each on its own connection.
+const (
+	DefaultSegments = 4
+	MaxSegments     = 16
+)
+
+// downloadPiece is the unit a download is resumed by: a piece that was not
+// complete when the download stopped is fetched again.
+var downloadPiece int64 = 8 * 1024 * 1024
 
 // Part is the upload state of one chunk of a chunked file.
 type Part struct {
@@ -94,6 +106,10 @@ type Transfer struct {
 	// been renamed or moved since.
 	Chunk int64  `json:"chunk,omitempty"`
 	DirID string `json:"dirID,omitempty"`
+	// Download resume state: bit i of Have is set once piece i, Piece bytes
+	// long, is in the .part file.
+	Have  []byte `json:"have,omitempty"`
+	Piece int64  `json:"piece,omitempty"`
 	// ETag or Last-Modified of a partly fetched URL, sent as If-Range.
 	Validator string `json:"validator,omitempty"`
 	// External is set while a plugin is still fetching the file of an
@@ -119,6 +135,7 @@ type Manager struct {
 	lastSave  time.Time
 	Workers   int
 	parallel  int
+	segments  int
 	// RetryDelay is the base wait before a failed upload chunk is retried.
 	RetryDelay time.Duration
 	// AllowPrivateURLs lets URL jobs reach loopback, private and link-local
@@ -158,7 +175,7 @@ var publicClient = &http.Client{Transport: &http.Transport{
 // path changes between launches).
 func NewManager(stateDir, filesDir string) (*Manager, error) {
 	m := &Manager{stateFile: filepath.Join(stateDir, "transfers.json"), filesDir: filesDir, workDir: filepath.Join(stateDir, "work"),
-		items: map[string]*Transfer{}, wake: make(chan struct{}, 1), Workers: 2, parallel: DefaultParallel, RetryDelay: 2 * time.Second}
+		items: map[string]*Transfer{}, wake: make(chan struct{}, 1), Workers: 2, parallel: DefaultParallel, segments: DefaultSegments, RetryDelay: 2 * time.Second}
 	if err := os.MkdirAll(m.workDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -358,6 +375,20 @@ func (m *Manager) SetParallel(n int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.parallel = min(max(n, 1), MaxParallel)
+}
+
+// Segments is how many ranges of one file are downloaded at once.
+func (m *Manager) Segments() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.segments
+}
+
+// SetSegments changes it for the downloads that start from now on.
+func (m *Manager) SetSegments(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.segments = min(max(n, 1), MaxSegments)
 }
 
 // claim picks the remote name of a new upload and calls start with it while
@@ -699,6 +730,11 @@ func (m *Manager) sendPart(ctx context.Context, t *Transfer, fs *FS, dirID, name
 	return nil
 }
 
+func hasBit(b []byte, i int) bool { return b[i/8]&(1<<(i%8)) != 0 }
+
+// download fetches the file in pieces, m.Segments ranges at a time: the
+// file is shared out between that many streams, and one that is through
+// takes over half of what the slowest still has to read.
 func (m *Manager) download(ctx context.Context, t *Transfer, fs *FS) error {
 	it, err := fs.Stat(ctx, t.Remote)
 	if err != nil {
@@ -711,35 +747,196 @@ func (m *Manager) download(ctx context.Context, t *Transfer, fs *FS) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(dst+".part", os.O_CREATE|os.O_WRONLY, 0o644)
+	out, err := os.OpenFile(dst+".part", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-	fi, _ := out.Stat()
-	// Resume at the last complete block; restart if the remote file changed.
-	pos := fi.Size() / crypt.BlockData * crypt.BlockData
-	if t.Size != it.Size || !t.SrcMod.Equal(it.ModTime) || pos > it.Size {
-		pos = 0
-	}
-	if err := out.Truncate(pos); err != nil {
-		return err
-	}
-	if _, err := out.Seek(pos, io.SeekStart); err != nil {
-		return err
-	}
-	m.update(t, func() { t.Size, t.SrcMod, t.Done = it.Size, it.ModTime, pos })
-	rc, err := fs.Open(ctx, it, pos, -1)
+	fi, err := out.Stat()
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
-	if err := m.copy(rc, out, t, pos); err != nil {
+	n := int((it.Size + downloadPiece - 1) / downloadPiece)
+	pieceLen := func(i int) int64 { return min(downloadPiece, it.Size-int64(i)*downloadPiece) }
+	var total atomic.Int64
+	m.mu.Lock()
+	same := t.Size == it.Size && t.SrcMod.Equal(it.ModTime)
+	if !same || t.Piece != downloadPiece || len(t.Have) != (n+7)/8 || fi.Size() != it.Size {
+		have := make([]byte, (n+7)/8)
+		if same && t.Piece == 0 && fi.Size() <= it.Size {
+			// A part file written front to back by an earlier version.
+			for i := 0; i < int(fi.Size()/downloadPiece); i++ {
+				have[i/8] |= 1 << (i % 8)
+			}
+		}
+		t.Have = have
+	}
+	missing := 0
+	for i := 0; i < n; i++ {
+		if hasBit(t.Have, i) {
+			total.Add(pieceLen(i))
+		} else {
+			missing++
+		}
+	}
+	t.Size, t.SrcMod, t.Piece, t.Done = it.Size, it.ModTime, downloadPiece, total.Load()
+	workers := min(m.segments, missing)
+	m.saveLocked(true)
+	m.mu.Unlock()
+	if err := out.Truncate(it.Size); err != nil {
+		return err
+	}
+
+	// A stream reads the pieces from cur to stop. Guarded by m.mu, like t.Have.
+	type stream struct{ cur, stop int }
+	streams := map[*stream]bool{}
+	taken := make([]bool, n) // inside a stream
+	free := func(i int) bool { return !taken[i] && !hasBit(t.Have, i) }
+	// pick gives a new stream its share of the largest stretch nobody is
+	// reading, or else the second half of the stream with the most left.
+	pick := func() (s *stream, off, end int64) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		start, length, all := -1, 0, 0
+		for i := 0; i < n; i++ {
+			if !free(i) {
+				continue
+			}
+			j := i
+			for j < n && free(j) {
+				j++
+			}
+			if all += j - i; j-i > length {
+				start, length = i, j-i
+			}
+			i = j
+		}
+		s = &stream{}
+		if start >= 0 {
+			s.cur, s.stop = start, start+min(length, (all+workers-1)/workers)
+		} else {
+			var most *stream
+			for o := range streams {
+				if most == nil || o.stop-o.cur > most.stop-most.cur {
+					most = o
+				}
+			}
+			if most == nil || most.stop-most.cur < 3 {
+				return nil, 0, 0
+			}
+			s.cur, s.stop = most.stop-(most.stop-most.cur-1)/2, most.stop
+			most.stop = s.cur
+		}
+		for i := s.cur; i < s.stop; i++ {
+			taken[i] = true
+		}
+		streams[s] = true
+		return s, int64(s.cur) * downloadPiece, min(int64(s.stop)*downloadPiece, it.Size)
+	}
+	// finish records the piece s has read and says whether s goes on.
+	finish := func(s *stream) bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		t.Have[s.cur/8] |= 1 << (s.cur % 8)
+		taken[s.cur] = false
+		s.cur++
+		m.saveLocked(false)
+		if s.cur >= s.stop {
+			delete(streams, s)
+			return false
+		}
+		return true
+	}
+	drop := func(s *stream) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for i := s.cur; i < s.stop; i++ {
+			taken[i] = false
+		}
+		delete(streams, s)
+	}
+	pr := &progress{m: m, t: t}
+	var fails atomic.Int32
+	ctx, cancel := context.WithCancel(remote.WithBulk(ctx))
+	defer cancel()
+	work := func() error {
+		buf := make([]byte, 256*1024)
+		for {
+			s, off, end := pick()
+			if s == nil {
+				return nil
+			}
+			var got int64 // of piece s.cur, which only this worker changes
+			rc, err := fs.Open(ctx, it, off, end-off)
+			for err == nil {
+				left := pieceLen(s.cur) - got
+				if left == 0 {
+					fails.Store(0)
+					got = 0
+					if !finish(s) {
+						break
+					}
+					continue
+				}
+				var k int
+				k, err = rc.Read(buf[:min(left, int64(len(buf)))])
+				if k > 0 {
+					if _, werr := out.WriteAt(buf[:k], int64(s.cur)*downloadPiece+got); werr != nil {
+						rc.Close()
+						return werr
+					}
+					got += int64(k)
+					pr.set(total.Add(int64(k)), false)
+					if err == io.EOF {
+						err = nil
+					}
+				} else if err == io.EOF {
+					err = io.ErrUnexpectedEOF
+				}
+			}
+			if rc != nil {
+				rc.Close()
+			}
+			if err == nil {
+				continue
+			}
+			drop(s)
+			total.Add(-got)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if fails.Add(1) > 5 {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(m.RetryDelay):
+			}
+		}
+	}
+	errs := make(chan error, workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			err := work()
+			if err != nil {
+				cancel()
+			}
+			errs <- err
+		}()
+	}
+	for w := 0; w < workers; w++ {
+		if e := <-errs; e != nil && (err == nil || errors.Is(err, context.Canceled)) {
+			err = e
+		}
+	}
+	if err != nil {
 		return err
 	}
 	if err := out.Close(); err != nil {
 		return err
 	}
+	m.update(t, func() { t.Have = nil })
 	os.Chtimes(dst+".part", it.ModTime, it.ModTime)
 	return os.Rename(dst+".part", dst)
 }

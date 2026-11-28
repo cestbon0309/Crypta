@@ -3,6 +3,7 @@ package remote
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,8 +36,11 @@ type DriveConfig struct {
 }
 
 type Drive struct {
-	cfg  DriveConfig
-	hc   *http.Client
+	cfg DriveConfig
+	hc  *http.Client
+	// bulk speaks HTTP/1.1: one connection per request in flight, where
+	// HTTP/2 would put them all on one.
+	bulk *http.Client
 	base string
 }
 
@@ -60,7 +64,13 @@ func NewDrive(cfg DriveConfig) (*Drive, error) {
 		tokenURL = defaultTokenURL
 	}
 	oc := &oauth2.Config{ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret, Endpoint: oauth2.Endpoint{TokenURL: tokenURL, AuthStyle: oauth2.AuthStyleInParams}}
-	d.hc = oauth2.NewClient(context.Background(), oc.TokenSource(context.Background(), &tok))
+	ts := oauth2.ReuseTokenSource(nil, oc.TokenSource(context.Background(), &tok))
+	d.hc = oauth2.NewClient(context.Background(), ts)
+	h1 := http.DefaultTransport.(*http.Transport).Clone()
+	h1.ForceAttemptHTTP2 = false
+	h1.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	h1.MaxIdleConnsPerHost = 16
+	d.bulk = &http.Client{Transport: &oauth2.Transport{Source: ts, Base: h1}}
 	return d, nil
 }
 
@@ -111,7 +121,11 @@ func (d *Drive) do(ctx context.Context, method, u string, hdr http.Header, body 
 		for k, v := range hdr {
 			req.Header[k] = v
 		}
-		resp, err := d.hc.Do(req)
+		hc := d.hc
+		if bulk(ctx) {
+			hc = d.bulk
+		}
+		resp, err := hc.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

@@ -114,23 +114,32 @@ func TestDriveResume(t *testing.T) {
 		t.Fatal("range read differs")
 	}
 
-	// Download: interrupt, then resume from the partial file.
+	// Download: interrupt, then resume with the pieces that are there.
+	defer func(n int64) { downloadPiece = n }(downloadPiece)
+	downloadPiece = 1 << 20
 	dl, _ := m.Add(Transfer{Kind: KindDownload, Remote: "videos/movie.mkv", Local: "out/movie.mkv"})
 	for {
-		if fi, err := os.Stat(filepath.Join(files, "out/movie.mkv.part")); err == nil && fi.Size() > 1024*1024 {
-			break
-		}
 		if s := waitState(t, m, dl.ID, StateRunning, StateDone, StateQueued); s.State == StateDone {
+			t.Fatal("download finished before it could be interrupted")
+		} else if s.Done > 8<<20 {
 			break
 		}
-		time.Sleep(time.Millisecond)
+		time.Sleep(100 * time.Microsecond)
 	}
 	m.Act(dl.ID, "pause")
+	waitState(t, m, dl.ID, StatePaused)
 	time.Sleep(100 * time.Millisecond)
+	served := srv.Served()
 	m.Act(dl.ID, "resume")
 	waitState(t, m, dl.ID, StateDone)
 	if got, _ := os.ReadFile(filepath.Join(files, "out/movie.mkv")); !bytes.Equal(got, data) {
 		t.Fatal("download differs")
+	}
+	if srv.Streams < 2 {
+		t.Fatalf("download ran %d stream(s) at a time", srv.Streams)
+	}
+	if n := srv.Served() - served; n > int64(len(data))-4<<20 {
+		t.Fatalf("resumed download fetched %d bytes of %d", n, len(data))
 	}
 
 	// A second upload of the name is kept beside the first; rename, delete on Drive.
@@ -273,5 +282,72 @@ func TestDriveChunkedResume(t *testing.T) {
 			t.Fatalf("canceled upload left %d objects (%v)", len(entries), err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A download of a chunked file crosses the chunks in every segment, and a
+// part file left by a version that wrote front to back is continued.
+func TestSegmentedDownload(t *testing.T) {
+	srv := fakedrive.New()
+	defer srv.Close()
+	fs, err := New(&Config{Backend: "drive", Path: "enc", Crypt: crypt.Options{Password: "pw"}, ChunkSize: 3<<20 + 4096,
+		Drive: remote.DriveConfig{ClientID: "id", Token: json.RawMessage(`{"refresh_token":"rt"}`), APIBase: srv.URL, TokenURL: srv.URL + "/token"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	files := filepath.Join(dir, "files")
+	os.MkdirAll(files, 0o755)
+	m, err := NewManager(filepath.Join(dir, "state"), files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.SetFS(fs)
+	go m.Run(ctx)
+	defer func(n int64) { downloadPiece = n }(downloadPiece)
+	downloadPiece = 1 << 20
+	data := randBytes(20<<20 + 12345)
+	os.WriteFile(filepath.Join(files, "big.bin"), data, 0o644)
+	os.WriteFile(filepath.Join(files, "empty.bin"), nil, 0o644)
+	for _, name := range []string{"big.bin", "empty.bin"} {
+		up, _ := m.Add(Transfer{Kind: KindUpload, Local: name, Remote: "d"})
+		waitState(t, m, up.ID, StateDone)
+	}
+	for _, n := range []int{1, 4, 16} {
+		m.SetSegments(n)
+		srv.Streams = 0
+		dl, _ := m.Add(Transfer{Kind: KindDownload, Remote: "d/big.bin", Local: "out/big.bin"})
+		s := waitState(t, m, dl.ID, StateDone, StateFailed)
+		if got, _ := os.ReadFile(filepath.Join(files, s.Local)); s.State != StateDone || !bytes.Equal(got, data) {
+			t.Fatalf("%d segments: %s %s", n, s.State, s.Error)
+		}
+		if srv.Streams > n || (n > 1 && srv.Streams < 2) {
+			t.Fatalf("%d segments ran %d streams at a time", n, srv.Streams)
+		}
+	}
+	dl, _ := m.Add(Transfer{Kind: KindDownload, Remote: "d/empty.bin", Local: "out/empty.bin"})
+	waitState(t, m, dl.ID, StateDone)
+	if fi, err := os.Stat(filepath.Join(files, "out/empty.bin")); err != nil || fi.Size() != 0 {
+		t.Fatal(fi, err)
+	}
+
+	// The old part file holds 5 MiB and a bit; the rest is fetched.
+	it, _ := fs.Stat(ctx, "d/big.bin")
+	os.WriteFile(filepath.Join(files, "out/old.bin.part"), data[:5<<20+777], 0o644)
+	m.mu.Lock()
+	old := &Transfer{ID: "old", Kind: KindDownload, State: StateQueued, Remote: "d/big.bin", Local: "out/old.bin", Name: "old.bin",
+		Size: it.Size, SrcMod: it.ModTime, CreatedAt: time.Now()}
+	m.items[old.ID] = old
+	m.mu.Unlock()
+	served := srv.Served()
+	m.kick()
+	waitState(t, m, "old", StateDone)
+	if got, _ := os.ReadFile(filepath.Join(files, "out/old.bin")); !bytes.Equal(got, data) {
+		t.Fatal("continued download differs")
+	}
+	if n := srv.Served() - served; n > 19<<20 {
+		t.Fatalf("continued download fetched %d bytes", n)
 	}
 }

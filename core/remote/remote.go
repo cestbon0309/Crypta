@@ -45,6 +45,19 @@ type Remote interface {
 
 const ChunkAlign = 256 * 1024
 
+type bulkKey struct{}
+
+// WithBulk makes Open use a connection of its own for each stream, so that
+// ranges read side by side do not share the throughput of one connection.
+func WithBulk(ctx context.Context) context.Context {
+	return context.WithValue(ctx, bulkKey{}, true)
+}
+
+func bulk(ctx context.Context) bool {
+	b, _ := ctx.Value(bulkKey{}).(bool)
+	return b
+}
+
 type sentKey struct{}
 
 // WithSent makes UploadChunk report, while a chunk is on its way, how many

@@ -74,6 +74,11 @@ func Start(stateDir, filesDir string) (string, error) {
 			tm.SetParallel(n)
 		}
 	}
+	if b, err := os.ReadFile(a.segmentsPath()); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			tm.SetSegments(n)
+		}
+	}
 	a.srv = &api.Server{Transfers: tm, Auth: func(t string) bool { return api.SameToken(t, token) }, Extra: a.routes}
 	if b, err := os.ReadFile(a.path()); err == nil {
 		if json.Unmarshal(b, &a.saved) == nil && a.saved.Config != nil {
@@ -150,6 +155,8 @@ func Resume() (string, error) {
 
 func (a *app) parallelPath() string { return filepath.Join(a.stateDir, "parallel") }
 
+func (a *app) segmentsPath() string { return filepath.Join(a.stateDir, "segments") }
+
 func (a *app) path() string { return filepath.Join(a.stateDir, "config.json") }
 
 // The app container path changes between installs, so the demo store
@@ -222,7 +229,7 @@ func (a *app) routes(mux *http.ServeMux, s *api.Server) {
 			backend = a.saved.Config.Backend
 		}
 		api.JSON(w, 200, map[string]any{"configured": a.saved.Config != nil, "demo": a.saved.Demo, "backend": backend,
-			"server": a.saved.Server, "serverToken": a.saved.ServerToken, "parallel": s.Transfers.Parallel()})
+			"server": a.saved.Server, "serverToken": a.saved.ServerToken, "parallel": s.Transfers.Parallel(), "segments": s.Transfers.Segments()})
 	}
 	mux.HandleFunc("GET /api/setup", s.Authed(func(w http.ResponseWriter, r *http.Request) { reply(w, nil) }))
 	// List the crypt remotes in an rclone.conf so the user can pick one.
@@ -271,6 +278,13 @@ func (a *app) routes(mux *http.ServeMux, s *api.Server) {
 		json.NewDecoder(r.Body).Decode(&in)
 		s.Transfers.SetParallel(in.Parallel)
 		reply(w, os.WriteFile(a.parallelPath(), []byte(strconv.Itoa(s.Transfers.Parallel())), 0o600))
+	}))
+	// How many ranges of a file are downloaded at once.
+	mux.HandleFunc("POST /api/setup/segments", s.Authed(func(w http.ResponseWriter, r *http.Request) {
+		var in struct{ Segments int }
+		json.NewDecoder(r.Body).Decode(&in)
+		s.Transfers.SetSegments(in.Segments)
+		reply(w, os.WriteFile(a.segmentsPath(), []byte(strconv.Itoa(s.Transfers.Segments())), 0o600))
 	}))
 	mux.HandleFunc("POST /api/setup/reset", s.Authed(func(w http.ResponseWriter, r *http.Request) {
 		reply(w, a.apply(saved{}))

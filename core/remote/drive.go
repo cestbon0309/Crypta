@@ -66,12 +66,19 @@ func NewDrive(cfg DriveConfig) (*Drive, error) {
 	oc := &oauth2.Config{ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret, Endpoint: oauth2.Endpoint{TokenURL: tokenURL, AuthStyle: oauth2.AuthStyleInParams}}
 	ts := oauth2.ReuseTokenSource(nil, oc.TokenSource(context.Background(), &tok))
 	d.hc = oauth2.NewClient(context.Background(), ts)
-	h1 := http.DefaultTransport.(*http.Transport).Clone()
-	h1.ForceAttemptHTTP2 = false
-	h1.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
-	h1.MaxIdleConnsPerHost = 16
-	d.bulk = &http.Client{Transport: &oauth2.Transport{Source: ts, Base: h1}}
+	d.bulk = &http.Client{Transport: &oauth2.Transport{Source: ts, Base: http1Transport()}}
 	return d, nil
+}
+
+// http1Transport never speaks HTTP/2. A clone of the default transport
+// still offers h2 to the server, so what is offered is set here as well.
+func http1Transport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ForceAttemptHTTP2 = false
+	t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	t.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+	t.MaxIdleConnsPerHost = 16
+	return t
 }
 
 func (d *Drive) RootID() string {

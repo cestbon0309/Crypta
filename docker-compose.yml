@@ -42,6 +42,9 @@ services:
       TELEGRAM_API_BASE: ${TELEGRAM_API_BASE:-}
       TELEGRAM_LOCAL_MODE: ${TELEGRAM_LOCAL_MODE:-}
       TELEGRAM_API_SHARE: telegram-bot-api
+      # For /login: the bot fetches linked messages with the user's own account.
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
       TZ: ${TZ:-UTC}
     volumes:
       - crypta-data:/data:ro
@@ -49,6 +52,8 @@ services:
       # A local Bot API server hands the bot paths inside its data folder;
       # writable, because the bot moves each file to where the core takes it.
       - telegram-bot-api:/var/lib/telegram-bot-api
+      # The Telegram logins made with /login.
+      - telegram-sessions:/sessions
 
   # Self-hosted Bot API server: lifts the bot's download limit from 20 MB to
   # 2 GB. Set TELEGRAM_API_BASE=http://telegram-bot-api:8081 and
@@ -80,4 +85,5 @@ volumes:
   crypta-data:
   crypta-downloads:
   telegram-bot-api:
+  telegram-sessions:
   caddy-data:

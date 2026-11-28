@@ -1,0 +1,82 @@
+name: Release
+
+# 仅在推送 tag 时自动触发（push 分支、PR 等其他情况均不自动运行）；
+# workflow_dispatch 仅用于手动在 GitHub 页面点击触发。
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test Core & Telegram Bot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Run Go tests
+        working-directory: core
+        run: go test ./...
+
+      - name: Run Telegram bot tests
+        run: python3 -m unittest -v plugins/telegram/test_bot_logging.py
+
+  ios:
+    name: Build iOS IPA & Publish Release
+    needs: test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: core/go.mod
+          cache-dependency-path: core/go.sum
+
+      - name: Cache MobileVLCKit
+        uses: actions/cache@v4
+        with:
+          path: ios/Frameworks/MobileVLCKit.xcframework
+          key: vlckit-${{ hashFiles('scripts/fetch-vlckit.sh') }}
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Set iOS version from tag
+        if: github.ref_type == 'tag'
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          if [[ "$VER" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            sed -i '' "s/MARKETING_VERSION: \".*\"/MARKETING_VERSION: \"${VER}\"/" ios/project.yml
+          fi
+
+      - name: Build unsigned IPA
+        run: bash scripts/build-ios.sh
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Crypta-iOS-IPA
+          path: build/Crypta.ipa
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" build/Crypta.ipa --clobber
+          else
+            gh release create "$TAG" build/Crypta.ipa --title "$TAG" --generate-notes
+          fi

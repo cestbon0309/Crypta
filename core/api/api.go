@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cestbon0309/crypta/core/engine"
 	"github.com/cestbon0309/crypta/core/remote"
@@ -43,8 +44,9 @@ type Server struct {
 	// Extra routes (pairing on the server, setup on the phone).
 	Extra func(mux *http.ServeMux, s *Server)
 
-	mu sync.RWMutex
-	fs *engine.FS
+	mu          sync.RWMutex
+	fs          *engine.FS
+	streamBytes atomic.Int64
 }
 
 func (s *Server) SetFS(fs *engine.FS) {
@@ -158,6 +160,9 @@ func (s *Server) Handler() http.Handler {
 		s.done(w, fs.Delete(r.Context(), in.Path))
 	}))
 	mux.HandleFunc("GET /api/file", s.withFS(s.file))
+	mux.HandleFunc("GET /api/stream", s.Authed(func(w http.ResponseWriter, r *http.Request) {
+		JSON(w, 200, map[string]int64{"bytes": s.streamBytes.Load()})
+	}))
 	// The thumbnail the server stored for a picture or a video; 404 without one.
 	mux.HandleFunc("GET /api/thumb", s.withFS(func(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 		it, err := fs.Stat(r.Context(), r.URL.Query().Get("path"))
@@ -400,7 +405,20 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request, fs *engine.FS) {
 	}
 	defer rc.Close()
 	w.WriteHeader(status)
-	io.Copy(w, rc)
+	io.Copy(countingWriter{w: w, n: &s.streamBytes}, rc)
+}
+
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
 }
 
 // Serve runs h until ctx ends.

@@ -147,8 +147,14 @@ struct API {
     }
 
     struct Media: Decodable { let splitTracks: Bool; let audioTracks: Int }
+    struct StreamStats: Decodable { let bytes: Int64 }
 
     func media(_ path: String) async throws -> Media { try await get("api/media", ["path": path]) }
+
+    func streamBytes() async throws -> Int64 {
+        let r: StreamStats = try await get("api/stream")
+        return r.bytes
+    }
 
     func transfers() async throws -> [Transfer] {
         let r: TransferList = try await get("api/transfers")
